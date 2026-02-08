@@ -32,4 +32,6 @@ async def to_code(config):
     component_dir = os.path.dirname(os.path.realpath(__file__))
     lib_dir = os.path.join(component_dir, "lib")
     
-    cg.add_library("bluetti_encryption", lib_dir)
+    cg.add_build_flag(f"-L{lib_dir}")
+    cg.add_build_flag("-lbluetti_encryption")
+    cg.add_library("bluetti_encryption", None)
