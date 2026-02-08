@@ -5,9 +5,6 @@ esphome:
   friendly_name: Bluetti EL30V2
   min_version: 2026.1.4
   name_add_mac_suffix: false
-  platformio_options:
-    extra_scripts:
-      - post:/config/link_rust.py
 
 interval:
   - interval: 15s
