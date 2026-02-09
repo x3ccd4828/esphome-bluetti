@@ -11,18 +11,6 @@ namespace bluetti_rust {
 
 static const char *const TAG = "bluetti_rust";
 
-// Output type helper struct to consolidate AC/DC logic
-struct OutputConfig {
-    const char *name;
-    uint16_t reg;
-    uint32_t debounce_ms;
-    uint32_t &last_toggle_ms;
-    bool &state_known;
-    bool &enabled;
-    bool &pending;
-    bool &pending_value;
-};
-
 BluettiRust::~BluettiRust() {
     if (this->rust_ctx_ != nullptr) {
         bluetti_free(this->rust_ctx_);
