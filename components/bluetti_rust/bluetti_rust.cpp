@@ -69,6 +69,7 @@ void BluettiRust::gattc_event_handler(esp_gattc_cb_event_t event,
         this->write_handle_ = 0;
         this->mark_metrics_unavailable();
         this->reset_poll_state();
+        this->poll_index_ = 0;
 
         if (this->rust_ctx_ != nullptr) {
             bluetti_free(this->rust_ctx_);
@@ -570,7 +571,7 @@ void BluettiRust::mark_metrics_unavailable() {
 void BluettiRust::reset_poll_state() {
     this->pending_register_ = 0;
     this->pending_since_ms_ = 0;
-    this->poll_index_ = 0;
+    // Don't reset poll_index_ here - it should advance after successful reads
     this->pending_ac_toggle_ = false;
     this->pending_ac_toggle_value_ = false;
     this->pending_dc_toggle_ = false;
@@ -581,18 +582,21 @@ void BluettiRust::reset_poll_state() {
 
 void BluettiRust::handle_decrypted_response(const uint8_t *data, size_t len) {
     if (data == nullptr || len < 5) {
+        ESP_LOGV(TAG, "Response too short: %u bytes",
+                 static_cast<unsigned>(len));
         return;
     }
 
-    ESP_LOGVV(TAG, "Decrypted response (%u bytes): %02X %02X %02X %02X %02X",
-              static_cast<unsigned>(len), data[0], data[1], data[2], data[3],
-              data[4]);
+    ESP_LOGVV(TAG, "RX (%u bytes): %02X %02X ... %02X %02X",
+              static_cast<unsigned>(len), data[0], data[1], data[len - 2],
+              data[len - 1]);
 
     const uint16_t crc_expected = modbus_crc16(data, len - 2);
     const uint16_t crc_actual = static_cast<uint16_t>(data[len - 2]) |
                                 static_cast<uint16_t>(data[len - 1] << 8);
     if (crc_expected != crc_actual) {
-        ESP_LOGVV(TAG, "Ignoring response with invalid CRC");
+        ESP_LOGW(TAG, "CRC mismatch: reg=%u expected=%04X actual=%04X",
+                 this->pending_register_, crc_expected, crc_actual);
         return;
     }
 
@@ -610,11 +614,12 @@ void BluettiRust::handle_decrypted_response(const uint8_t *data, size_t len) {
         ESP_LOGW(TAG, "MODBUS exception for register %u (code=0x%02X)",
                  this->pending_register_, ex);
         this->reset_poll_state();
+        this->poll_index_ = (this->poll_index_ + 1) % POLL_REGISTER_COUNT;
         return;
     }
 
     if (this->pending_register_ == 0) {
-        ESP_LOGVV(TAG, "Ignoring unsolicited MODBUS response");
+        ESP_LOGV(TAG, "Ignoring unsolicited response");
         return;
     }
 
@@ -622,23 +627,24 @@ void BluettiRust::handle_decrypted_response(const uint8_t *data, size_t len) {
     if (len >= 7 && data[1] == 0x03) {
         const uint8_t byte_count = data[2];
         if (byte_count < 2 || len < static_cast<size_t>(byte_count) + 5) {
-            ESP_LOGVV(TAG, "Ignoring malformed MODBUS response (%u bytes)",
-                      static_cast<unsigned>(len));
+            ESP_LOGW(TAG, "Malformed response: reg=%u byte_count=%u len=%u",
+                     this->pending_register_, byte_count,
+                     static_cast<unsigned>(len));
             return;
         }
         value = static_cast<uint16_t>(data[3] << 8) | data[4];
+        ESP_LOGV(TAG, "Read reg=%u value=%u", this->pending_register_, value);
     } else if (len >= 7) {
-        // Some Bluetti firmwares return a response with a proprietary 3-byte
-        // prefix where the payload starts at byte 3.
         value = static_cast<uint16_t>(data[3] << 8) | data[4];
     } else {
-        ESP_LOGVV(TAG, "Ignoring short response (%u bytes)",
-                  static_cast<unsigned>(len));
+        ESP_LOGV(TAG, "Short response (%u bytes) for register %u",
+                 static_cast<unsigned>(len), this->pending_register_);
         return;
     }
 
     this->apply_register_value(this->pending_register_, value);
     this->reset_poll_state();
+    this->poll_index_ = (this->poll_index_ + 1) % POLL_REGISTER_COUNT;
 }
 
 void BluettiRust::apply_register_value(uint16_t reg_addr, uint16_t value) {
