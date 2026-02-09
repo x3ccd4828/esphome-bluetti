@@ -556,7 +556,7 @@ bool BluettiRust::build_modbus_command(uint8_t func_code, uint16_t reg_addr,
 
 void BluettiRust::mark_metrics_unavailable() {
     this->battery_soc_ = NAN;
-    this->time_remaining_hour_ = NAN;
+    this->time_remaining_min_ = -1;
     this->dc_output_power_w_ = NAN;
     this->ac_output_power_w_ = NAN;
     this->dc_input_power_w_ = NAN;
@@ -653,8 +653,7 @@ void BluettiRust::apply_register_value(uint16_t reg_addr, uint16_t value) {
         this->battery_soc_ = static_cast<float>(value);
         break;
     case REG_TIME_REMAINING:
-        this->time_remaining_hour_ =
-            (static_cast<float>(value) * 167.0f) / 10000.0f;
+        this->time_remaining_min_ = static_cast<int>(value);
         break;
     case REG_DC_OUTPUT_POWER:
         this->dc_output_power_w_ = static_cast<float>(value);

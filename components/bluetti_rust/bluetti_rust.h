@@ -30,7 +30,7 @@ class BluettiRust : public Component, public ble_client::BLEClientNode {
     bool set_dc_output(bool enabled);
 
     float battery_soc() const { return this->battery_soc_; }
-    float time_remaining_hour() const { return this->time_remaining_hour_; }
+    int time_remaining_minutes() const { return this->time_remaining_min_; }
     float dc_output_power() const { return this->dc_output_power_w_; }
     float ac_output_power() const { return this->ac_output_power_w_; }
     float dc_input_power() const { return this->dc_input_power_w_; }
@@ -93,7 +93,7 @@ class BluettiRust : public Component, public ble_client::BLEClientNode {
     uint8_t cached_pubkey_response_[TX_BUFFER_SIZE]{};
 
     float battery_soc_{NAN};
-    float time_remaining_hour_{NAN};
+    int time_remaining_min_{-1};
     float dc_output_power_w_{NAN};
     float ac_output_power_w_{NAN};
     float dc_input_power_w_{NAN};
