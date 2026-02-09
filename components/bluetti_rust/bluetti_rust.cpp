@@ -11,6 +11,18 @@ namespace bluetti_rust {
 
 static const char *const TAG = "bluetti_rust";
 
+// Output type helper struct to consolidate AC/DC logic
+struct OutputConfig {
+  const char *name;
+  uint16_t reg;
+  uint32_t debounce_ms;
+  uint32_t &last_toggle_ms;
+  bool &state_known;
+  bool &enabled;
+  bool &pending;
+  bool &pending_value;
+};
+
 BluettiRust::~BluettiRust() {
   if (this->rust_ctx_ != nullptr) {
     bluetti_free(this->rust_ctx_);
@@ -34,17 +46,7 @@ void BluettiRust::setup() {
   }
 
   this->mark_metrics_unavailable();
-  this->pending_register_ = 0;
-  this->pending_since_ms_ = 0;
-  this->last_ac_toggle_request_ms_ = 0;
-  this->last_dc_toggle_request_ms_ = 0;
-  this->poll_index_ = 0;
-  this->pending_ac_toggle_ = false;
-  this->pending_ac_toggle_value_ = false;
-  this->pending_dc_toggle_ = false;
-  this->pending_dc_toggle_value_ = false;
-  this->awaiting_pubkey_accepted_ = false;
-  this->cached_pubkey_response_len_ = 0;
+  this->reset_poll_state();
 
   this->set_interval("bluetti_poll", POLL_INTERVAL_MS,
                      [this]() { this->poll_next_register(); });
@@ -58,11 +60,7 @@ void BluettiRust::dump_config() {
 }
 
 bool BluettiRust::is_ready() const {
-  if (this->rust_ctx_ == nullptr) {
-    return false;
-  }
-
-  return bluetti_is_ready(this->rust_ctx_);
+  return this->rust_ctx_ != nullptr && bluetti_is_ready(this->rust_ctx_);
 }
 
 void BluettiRust::gattc_event_handler(esp_gattc_cb_event_t event,
@@ -82,16 +80,7 @@ void BluettiRust::gattc_event_handler(esp_gattc_cb_event_t event,
     this->notify_handle_ = 0;
     this->write_handle_ = 0;
     this->mark_metrics_unavailable();
-    this->pending_register_ = 0;
-    this->pending_since_ms_ = 0;
-    this->last_ac_toggle_request_ms_ = 0;
-    this->last_dc_toggle_request_ms_ = 0;
-    this->pending_ac_toggle_ = false;
-    this->pending_ac_toggle_value_ = false;
-    this->pending_dc_toggle_ = false;
-    this->pending_dc_toggle_value_ = false;
-    this->awaiting_pubkey_accepted_ = false;
-    this->cached_pubkey_response_len_ = 0;
+    this->reset_poll_state();
 
     if (this->rust_ctx_ != nullptr) {
       bluetti_free(this->rust_ctx_);
@@ -177,153 +166,161 @@ void BluettiRust::process_notification(const uint8_t *data, size_t len) {
   ESP_LOGVV(TAG, "Notify RX (%u bytes): %02X %02X", static_cast<unsigned>(len),
             data[0], data[1]);
 
-  int32_t rc = BLUETTI_FFI_ERR_INVALID_INPUT;
-
+  // Handle plain KEX messages (starts with magic bytes)
   if (data[0] == KEX_MAGIC_0 && data[1] == KEX_MAGIC_1) {
     if (len < 3) {
       return;
     }
-
-    size_t out_len = sizeof(this->tx_buffer_);
-
-    switch (data[2]) {
-    case 0x01:
-      this->awaiting_pubkey_accepted_ = false;
-      this->cached_pubkey_response_len_ = 0;
-      rc = bluetti_handle_challenge(this->rust_ctx_, data, len,
-                                    this->tx_buffer_, &out_len);
-      if (rc == BLUETTI_FFI_OK && out_len > 0) {
-        if (!this->ble_write(this->tx_buffer_, out_len)) {
-          ESP_LOGW(TAG, "Failed to write challenge response");
-        }
-      }
-      break;
-
-    case 0x03:
-      ESP_LOGVV(TAG, "Challenge accepted");
-      return;
-
-    case 0x04:
-      if (this->awaiting_pubkey_accepted_ &&
-          this->cached_pubkey_response_len_ > 0) {
-        ESP_LOGVV(TAG, "Duplicate peer pubkey; resending cached response");
-        if (!this->ble_write(this->cached_pubkey_response_,
-                             this->cached_pubkey_response_len_)) {
-          ESP_LOGW(TAG, "Failed to resend cached peer pubkey response");
-        }
-        return;
-      }
-
-      rc = bluetti_handle_peer_pubkey(this->rust_ctx_, data, len,
-                                      this->tx_buffer_, &out_len);
-      if (rc == BLUETTI_FFI_OK && out_len > 0) {
-        std::memcpy(this->cached_pubkey_response_, this->tx_buffer_, out_len);
-        this->cached_pubkey_response_len_ = out_len;
-        this->awaiting_pubkey_accepted_ = true;
-        if (!this->ble_write(this->tx_buffer_, out_len)) {
-          ESP_LOGW(TAG, "Failed to write peer pubkey response");
-        }
-      }
-      break;
-
-    case 0x06:
-      rc = bluetti_handle_pubkey_accepted(this->rust_ctx_, data, len);
-      if (rc == BLUETTI_FFI_OK && this->is_ready()) {
-        ESP_LOGI(TAG, "Encryption handshake complete");
-        this->pending_register_ = 0;
-        this->pending_since_ms_ = 0;
-        this->poll_index_ = 0;
-        this->awaiting_pubkey_accepted_ = false;
-        this->cached_pubkey_response_len_ = 0;
-      }
-      break;
-
-    default:
-      ESP_LOGVV(TAG, "Unhandled plain KEX message type: 0x%02X", data[2]);
-      return;
-    }
-
-    if (rc != BLUETTI_FFI_OK) {
-      ESP_LOGW(TAG, "Rust FFI call failed (msg=0x%02X rc=%d)", data[2], rc);
-    }
-
+    this->handle_kex_message(data, len);
     return;
   }
 
-  size_t out_len = sizeof(this->tx_buffer_);
+  // Handle encrypted messages
+  this->handle_encrypted_message(data, len);
+}
 
+void BluettiRust::handle_kex_message(const uint8_t *data, size_t len) {
+  size_t out_len = sizeof(this->tx_buffer_);
+  int32_t rc = BLUETTI_FFI_ERR_INVALID_INPUT;
+
+  switch (data[2]) {
+  case 0x01:  // Challenge
+    this->awaiting_pubkey_accepted_ = false;
+    this->cached_pubkey_response_len_ = 0;
+    rc = bluetti_handle_challenge(this->rust_ctx_, data, len,
+                                  this->tx_buffer_, &out_len);
+    if (rc == BLUETTI_FFI_OK && out_len > 0) {
+      if (!this->ble_write(this->tx_buffer_, out_len)) {
+        ESP_LOGW(TAG, "Failed to write challenge response");
+      }
+    }
+    break;
+
+  case 0x03:  // Challenge accepted
+    ESP_LOGVV(TAG, "Challenge accepted");
+    return;
+
+  case 0x04:  // Peer pubkey
+    if (this->awaiting_pubkey_accepted_ &&
+        this->cached_pubkey_response_len_ > 0) {
+      ESP_LOGVV(TAG, "Duplicate peer pubkey; resending cached response");
+      if (!this->ble_write(this->cached_pubkey_response_,
+                           this->cached_pubkey_response_len_)) {
+        ESP_LOGW(TAG, "Failed to resend cached peer pubkey response");
+      }
+      return;
+    }
+
+    rc = bluetti_handle_peer_pubkey(this->rust_ctx_, data, len,
+                                    this->tx_buffer_, &out_len);
+    if (rc == BLUETTI_FFI_OK && out_len > 0) {
+      std::memcpy(this->cached_pubkey_response_, this->tx_buffer_, out_len);
+      this->cached_pubkey_response_len_ = out_len;
+      this->awaiting_pubkey_accepted_ = true;
+      if (!this->ble_write(this->tx_buffer_, out_len)) {
+        ESP_LOGW(TAG, "Failed to write peer pubkey response");
+      }
+    }
+    break;
+
+  case 0x06:  // Pubkey accepted
+    rc = bluetti_handle_pubkey_accepted(this->rust_ctx_, data, len);
+    if (rc == BLUETTI_FFI_OK && this->is_ready()) {
+      ESP_LOGI(TAG, "Encryption handshake complete");
+      this->reset_poll_state();
+    }
+    break;
+
+  default:
+    ESP_LOGVV(TAG, "Unhandled plain KEX message type: 0x%02X", data[2]);
+    return;
+  }
+
+  if (rc != BLUETTI_FFI_OK) {
+    ESP_LOGW(TAG, "Rust FFI call failed (msg=0x%02X rc=%d)", data[2], rc);
+  }
+}
+
+void BluettiRust::handle_encrypted_message(const uint8_t *data, size_t len) {
+  size_t out_len = sizeof(this->tx_buffer_);
+  int32_t rc = bluetti_decrypt_response(this->rust_ctx_, data, len,
+                                        this->tx_buffer_, &out_len);
+
+  if (rc != BLUETTI_FFI_OK) {
+    ESP_LOGVV(TAG, "Ignoring encrypted notification (%u bytes)",
+              static_cast<unsigned>(len));
+    return;
+  }
+
+  // If not ready, handle KEX inside encrypted message
   if (!this->is_ready()) {
-    rc = bluetti_decrypt_response(this->rust_ctx_, data, len, this->tx_buffer_,
-                                  &out_len);
-    if (rc != BLUETTI_FFI_OK || out_len < 3 ||
-        this->tx_buffer_[0] != KEX_MAGIC_0 ||
+    if (out_len < 3 || this->tx_buffer_[0] != KEX_MAGIC_0 ||
         this->tx_buffer_[1] != KEX_MAGIC_1) {
       ESP_LOGVV(TAG, "Ignoring encrypted notification (%u bytes)",
                 static_cast<unsigned>(len));
       return;
     }
 
-    const uint8_t kex_type = this->tx_buffer_[2];
-    switch (kex_type) {
-    case 0x04: {
-      if (this->awaiting_pubkey_accepted_ &&
-          this->cached_pubkey_response_len_ > 0) {
-        ESP_LOGVV(TAG,
-                  "Duplicate encrypted peer pubkey; resending cached response");
-        if (!this->ble_write(this->cached_pubkey_response_,
-                             this->cached_pubkey_response_len_)) {
-          ESP_LOGW(TAG,
-                   "Failed to resend cached encrypted peer pubkey response");
-        }
-        return;
-      }
-
-      size_t response_len = sizeof(this->tx_buffer_);
-      rc = bluetti_handle_peer_pubkey(this->rust_ctx_, this->tx_buffer_,
-                                      out_len, this->tx_buffer_, &response_len);
-      if (rc == BLUETTI_FFI_OK && response_len > 0) {
-        std::memcpy(this->cached_pubkey_response_, this->tx_buffer_,
-                    response_len);
-        this->cached_pubkey_response_len_ = response_len;
-        this->awaiting_pubkey_accepted_ = true;
-        if (!this->ble_write(this->tx_buffer_, response_len)) {
-          ESP_LOGW(TAG, "Failed to write encrypted local pubkey response");
-        }
-      } else {
-        ESP_LOGW(TAG, "Peer pubkey handling failed (rc=%d)", rc);
-      }
-      return;
-    }
-
-    case 0x06:
-      rc = bluetti_handle_pubkey_accepted(this->rust_ctx_, this->tx_buffer_,
-                                          out_len);
-      if (rc == BLUETTI_FFI_OK) {
-        if (this->is_ready()) {
-          ESP_LOGI(TAG, "Encryption handshake complete");
-          this->awaiting_pubkey_accepted_ = false;
-          this->cached_pubkey_response_len_ = 0;
-        }
-      } else {
-        ESP_LOGW(TAG, "Pubkey accepted handling failed (rc=%d)", rc);
-      }
-      return;
-
-    default:
-      ESP_LOGVV(TAG, "Unhandled decrypted KEX message type: 0x%02X", kex_type);
-      return;
-    }
-  }
-
-  rc = bluetti_decrypt_response(this->rust_ctx_, data, len, this->tx_buffer_,
-                                &out_len);
-  if (rc == BLUETTI_FFI_OK) {
-    this->handle_decrypted_response(this->tx_buffer_, out_len);
+    this->handle_encrypted_kex(out_len);
     return;
   }
 
-  ESP_LOGVV(TAG, "Ignoring encrypted notification (%u bytes)",
-            static_cast<unsigned>(len));
+  // Ready - handle as MODBUS response
+  this->handle_decrypted_response(this->tx_buffer_, out_len);
+}
+
+void BluettiRust::handle_encrypted_kex(size_t decrypted_len) {
+  const uint8_t kex_type = this->tx_buffer_[2];
+  int32_t rc = BLUETTI_FFI_OK;
+
+  switch (kex_type) {
+  case 0x04: {
+    if (this->awaiting_pubkey_accepted_ &&
+        this->cached_pubkey_response_len_ > 0) {
+      ESP_LOGVV(TAG,
+                "Duplicate encrypted peer pubkey; resending cached response");
+      if (!this->ble_write(this->cached_pubkey_response_,
+                           this->cached_pubkey_response_len_)) {
+        ESP_LOGW(TAG,
+                 "Failed to resend cached encrypted peer pubkey response");
+      }
+      return;
+    }
+
+    size_t response_len = sizeof(this->tx_buffer_);
+    rc = bluetti_handle_peer_pubkey(this->rust_ctx_, this->tx_buffer_,
+                                    decrypted_len, this->tx_buffer_,
+                                    &response_len);
+    if (rc == BLUETTI_FFI_OK && response_len > 0) {
+      std::memcpy(this->cached_pubkey_response_, this->tx_buffer_,
+                  response_len);
+      this->cached_pubkey_response_len_ = response_len;
+      this->awaiting_pubkey_accepted_ = true;
+      if (!this->ble_write(this->tx_buffer_, response_len)) {
+        ESP_LOGW(TAG, "Failed to write encrypted local pubkey response");
+      }
+    } else {
+      ESP_LOGW(TAG, "Peer pubkey handling failed (rc=%d)", rc);
+    }
+    return;
+  }
+
+  case 0x06:
+    rc = bluetti_handle_pubkey_accepted(this->rust_ctx_, this->tx_buffer_,
+                                        decrypted_len);
+    if (rc == BLUETTI_FFI_OK && this->is_ready()) {
+      ESP_LOGI(TAG, "Encryption handshake complete");
+      this->awaiting_pubkey_accepted_ = false;
+      this->cached_pubkey_response_len_ = 0;
+    } else if (rc != BLUETTI_FFI_OK) {
+      ESP_LOGW(TAG, "Pubkey accepted handling failed (rc=%d)", rc);
+    }
+    return;
+
+  default:
+    ESP_LOGVV(TAG, "Unhandled decrypted KEX message type: 0x%02X", kex_type);
+    return;
+  }
 }
 
 bool BluettiRust::ble_write(const uint8_t *data, size_t len) {
@@ -373,102 +370,82 @@ bool BluettiRust::send_modbus_command(const uint8_t *data, size_t len) {
   return true;
 }
 
-bool BluettiRust::set_ac_output(bool enabled) {
+bool BluettiRust::set_output(const OutputConfig &cfg, bool enabled) {
   if (this->rust_ctx_ == nullptr || !this->is_ready()) {
-    ESP_LOGW(TAG, "Cannot toggle AC output before handshake is complete");
+    ESP_LOGW(TAG, "Cannot toggle %s output before handshake is complete",
+             cfg.name);
     return false;
   }
 
   const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-  const uint32_t elapsed = now_ms - this->last_ac_toggle_request_ms_;
-  if (this->last_ac_toggle_request_ms_ != 0 &&
-      elapsed < AC_TOGGLE_DEBOUNCE_MS) {
-    ESP_LOGW(TAG, "Ignoring AC output toggle due to debounce (%u ms)",
-             static_cast<unsigned>(elapsed));
+  const uint32_t elapsed = now_ms - cfg.last_toggle_ms;
+  if (cfg.last_toggle_ms != 0 && elapsed < cfg.debounce_ms) {
+    ESP_LOGW(TAG, "Ignoring %s output toggle due to debounce (%u ms)",
+             cfg.name, static_cast<unsigned>(elapsed));
     return false;
   }
 
-  if (this->ac_output_state_known_ && this->ac_output_enabled_ == enabled &&
-      !this->pending_ac_toggle_) {
-    ESP_LOGI(TAG, "AC output already %s", enabled ? "ON" : "OFF");
+  if (cfg.state_known && cfg.enabled == enabled && !cfg.pending) {
+    ESP_LOGI(TAG, "%s output already %s", cfg.name, enabled ? "ON" : "OFF");
     return true;
   }
 
   if (this->pending_register_ != 0) {
-    this->pending_ac_toggle_ = true;
-    this->pending_ac_toggle_value_ = enabled;
-    this->last_ac_toggle_request_ms_ = now_ms;
-    ESP_LOGI(TAG, "Queued AC output toggle: %s", enabled ? "ON" : "OFF");
+    cfg.pending = true;
+    cfg.pending_value = enabled;
+    cfg.last_toggle_ms = now_ms;
+    ESP_LOGI(TAG, "Queued %s output toggle: %s", cfg.name,
+             enabled ? "ON" : "OFF");
     return true;
   }
 
   size_t cmd_len = sizeof(this->cmd_buffer_);
   const uint16_t value = enabled ? 1 : 0;
-  if (!this->build_write_register_command(REG_CTRL_AC_OUTPUT, value,
-                                          this->cmd_buffer_, &cmd_len)) {
-    ESP_LOGW(TAG, "Failed to build AC output write command");
+  if (!this->build_write_register_command(cfg.reg, value, this->cmd_buffer_,
+                                          &cmd_len)) {
+    ESP_LOGW(TAG, "Failed to build %s output write command", cfg.name);
     return false;
   }
 
   if (!this->send_modbus_command(this->cmd_buffer_, cmd_len)) {
-    ESP_LOGW(TAG, "Failed to send AC output write command");
+    ESP_LOGW(TAG, "Failed to send %s output write command", cfg.name);
     return false;
   }
 
-  this->pending_ac_toggle_ = false;
-  this->pending_ac_toggle_value_ = enabled;
-  this->last_ac_toggle_request_ms_ = now_ms;
-  ESP_LOGI(TAG, "AC output toggle requested: %s", enabled ? "ON" : "OFF");
+  cfg.pending = false;
+  cfg.pending_value = enabled;
+  cfg.last_toggle_ms = now_ms;
+  ESP_LOGI(TAG, "%s output toggle requested: %s", cfg.name,
+           enabled ? "ON" : "OFF");
   return true;
 }
 
+bool BluettiRust::set_ac_output(bool enabled) {
+  OutputConfig cfg{
+      .name = "AC",
+      .reg = REG_CTRL_AC_OUTPUT,
+      .debounce_ms = AC_TOGGLE_DEBOUNCE_MS,
+      .last_toggle_ms = this->last_ac_toggle_request_ms_,
+      .state_known = this->ac_output_state_known_,
+      .enabled = this->ac_output_enabled_,
+      .pending = this->pending_ac_toggle_,
+      .pending_value = this->pending_ac_toggle_value_,
+  };
+  return this->set_output(cfg, enabled);
+}
+
 bool BluettiRust::set_dc_output(bool enabled) {
-  if (this->rust_ctx_ == nullptr || !this->is_ready()) {
-    ESP_LOGW(TAG, "Cannot toggle DC output before handshake is complete");
-    return false;
-  }
-
-  const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-  const uint32_t elapsed = now_ms - this->last_dc_toggle_request_ms_;
-  if (this->last_dc_toggle_request_ms_ != 0 &&
-      elapsed < DC_TOGGLE_DEBOUNCE_MS) {
-    ESP_LOGW(TAG, "Ignoring DC output toggle due to debounce (%u ms)",
-             static_cast<unsigned>(elapsed));
-    return false;
-  }
-
-  if (this->dc_output_state_known_ && this->dc_output_enabled_ == enabled &&
-      !this->pending_dc_toggle_) {
-    ESP_LOGI(TAG, "DC output already %s", enabled ? "ON" : "OFF");
-    return true;
-  }
-
-  if (this->pending_register_ != 0) {
-    this->pending_dc_toggle_ = true;
-    this->pending_dc_toggle_value_ = enabled;
-    this->last_dc_toggle_request_ms_ = now_ms;
-    ESP_LOGI(TAG, "Queued DC output toggle: %s", enabled ? "ON" : "OFF");
-    return true;
-  }
-
-  size_t cmd_len = sizeof(this->cmd_buffer_);
-  const uint16_t value = enabled ? 1 : 0;
-  if (!this->build_write_register_command(REG_CTRL_DC_OUTPUT, value,
-                                          this->cmd_buffer_, &cmd_len)) {
-    ESP_LOGW(TAG, "Failed to build DC output write command");
-    return false;
-  }
-
-  if (!this->send_modbus_command(this->cmd_buffer_, cmd_len)) {
-    ESP_LOGW(TAG, "Failed to send DC output write command");
-    return false;
-  }
-
-  this->pending_dc_toggle_ = false;
-  this->pending_dc_toggle_value_ = enabled;
-  this->last_dc_toggle_request_ms_ = now_ms;
-  ESP_LOGI(TAG, "DC output toggle requested: %s", enabled ? "ON" : "OFF");
-  return true;
+  OutputConfig cfg{
+      .name = "DC",
+      .reg = REG_CTRL_DC_OUTPUT,
+      .debounce_ms = DC_TOGGLE_DEBOUNCE_MS,
+      .last_toggle_ms = this->last_dc_toggle_request_ms_,
+      .state_known = this->dc_output_state_known_,
+      .enabled = this->dc_output_enabled_,
+      .pending = this->pending_dc_toggle_,
+      .pending_value = this->pending_dc_toggle_value_,
+  };
+  return this->set_output(cfg, enabled);
 }
 
 void BluettiRust::poll_next_register() {
@@ -486,48 +463,22 @@ void BluettiRust::poll_next_register() {
 
     ESP_LOGW(TAG, "MODBUS poll timeout on register %u; retrying next",
              this->pending_register_);
-    this->pending_register_ = 0;
-    this->pending_since_ms_ = 0;
-    this->poll_index_ = (this->poll_index_ + 1) % POLL_REGISTER_COUNT;
+    this->reset_poll_state();
+    return;
   }
 
+  // Handle pending toggles
   if (this->pending_ac_toggle_) {
-    size_t cmd_len = sizeof(this->cmd_buffer_);
-    const uint16_t value = this->pending_ac_toggle_value_ ? 1 : 0;
-    if (!this->build_write_register_command(REG_CTRL_AC_OUTPUT, value,
-                                            this->cmd_buffer_, &cmd_len)) {
-      ESP_LOGW(TAG, "Failed to build queued AC output write command");
-      return;
-    }
-
-    if (!this->send_modbus_command(this->cmd_buffer_, cmd_len)) {
-      ESP_LOGW(TAG, "Failed to send queued AC output write command");
-      return;
-    }
-
-    this->pending_ac_toggle_ = false;
-    ESP_LOGI(TAG, "AC output toggle requested: %s",
-             this->pending_ac_toggle_value_ ? "ON" : "OFF");
+    this->process_pending_toggle("AC", REG_CTRL_AC_OUTPUT,
+                                 this->pending_ac_toggle_value_,
+                                 this->pending_ac_toggle_);
     return;
   }
 
   if (this->pending_dc_toggle_) {
-    size_t cmd_len = sizeof(this->cmd_buffer_);
-    const uint16_t value = this->pending_dc_toggle_value_ ? 1 : 0;
-    if (!this->build_write_register_command(REG_CTRL_DC_OUTPUT, value,
-                                            this->cmd_buffer_, &cmd_len)) {
-      ESP_LOGW(TAG, "Failed to build queued DC output write command");
-      return;
-    }
-
-    if (!this->send_modbus_command(this->cmd_buffer_, cmd_len)) {
-      ESP_LOGW(TAG, "Failed to send queued DC output write command");
-      return;
-    }
-
-    this->pending_dc_toggle_ = false;
-    ESP_LOGI(TAG, "DC output toggle requested: %s",
-             this->pending_dc_toggle_value_ ? "ON" : "OFF");
+    this->process_pending_toggle("DC", REG_CTRL_DC_OUTPUT,
+                                 this->pending_dc_toggle_value_,
+                                 this->pending_dc_toggle_);
     return;
   }
 
@@ -554,37 +505,46 @@ void BluettiRust::poll_next_register() {
   }
 }
 
+void BluettiRust::process_pending_toggle(const char *name, uint16_t reg,
+                                         bool value, bool &pending_flag) {
+  size_t cmd_len = sizeof(this->cmd_buffer_);
+  const uint16_t int_value = value ? 1 : 0;
+  if (!this->build_write_register_command(reg, int_value, this->cmd_buffer_,
+                                          &cmd_len)) {
+    ESP_LOGW(TAG, "Failed to build queued %s output write command", name);
+    return;
+  }
+
+  if (!this->send_modbus_command(this->cmd_buffer_, cmd_len)) {
+    ESP_LOGW(TAG, "Failed to send queued %s output write command", name);
+    return;
+  }
+
+  pending_flag = false;
+  ESP_LOGI(TAG, "%s output toggle requested: %s", name, value ? "ON" : "OFF");
+}
+
 bool BluettiRust::build_read_register_command(uint16_t reg_addr,
                                               uint16_t quantity, uint8_t *out,
                                               size_t *out_len) const {
-  if (out == nullptr || out_len == nullptr || *out_len < 8) {
-    return false;
-  }
-
-  out[0] = 0x01;
-  out[1] = 0x03;
-  out[2] = static_cast<uint8_t>(reg_addr >> 8);
-  out[3] = static_cast<uint8_t>(reg_addr & 0xFF);
-  out[4] = static_cast<uint8_t>(quantity >> 8);
-  out[5] = static_cast<uint8_t>(quantity & 0xFF);
-
-  const uint16_t crc = modbus_crc16(out, 6);
-  out[6] = static_cast<uint8_t>(crc & 0xFF);
-  out[7] = static_cast<uint8_t>(crc >> 8);
-  *out_len = 8;
-
-  return true;
+  return this->build_modbus_command(0x03, reg_addr, quantity, out, out_len);
 }
 
 bool BluettiRust::build_write_register_command(uint16_t reg_addr,
                                                uint16_t value, uint8_t *out,
                                                size_t *out_len) const {
+  return this->build_modbus_command(0x06, reg_addr, value, out, out_len);
+}
+
+bool BluettiRust::build_modbus_command(uint8_t func_code, uint16_t reg_addr,
+                                       uint16_t value, uint8_t *out,
+                                       size_t *out_len) const {
   if (out == nullptr || out_len == nullptr || *out_len < 8) {
     return false;
   }
 
   out[0] = 0x01;
-  out[1] = 0x06;
+  out[1] = func_code;
   out[2] = static_cast<uint8_t>(reg_addr >> 8);
   out[3] = static_cast<uint8_t>(reg_addr & 0xFF);
   out[4] = static_cast<uint8_t>(value >> 8);
@@ -610,6 +570,18 @@ void BluettiRust::mark_metrics_unavailable() {
   this->ac_output_state_known_ = false;
   this->dc_output_enabled_ = false;
   this->dc_output_state_known_ = false;
+}
+
+void BluettiRust::reset_poll_state() {
+  this->pending_register_ = 0;
+  this->pending_since_ms_ = 0;
+  this->poll_index_ = 0;
+  this->pending_ac_toggle_ = false;
+  this->pending_ac_toggle_value_ = false;
+  this->pending_dc_toggle_ = false;
+  this->pending_dc_toggle_value_ = false;
+  this->awaiting_pubkey_accepted_ = false;
+  this->cached_pubkey_response_len_ = 0;
 }
 
 void BluettiRust::handle_decrypted_response(const uint8_t *data, size_t len) {
@@ -641,9 +613,7 @@ void BluettiRust::handle_decrypted_response(const uint8_t *data, size_t len) {
     const uint8_t ex = len >= 5 ? data[2] : 0;
     ESP_LOGW(TAG, "MODBUS exception for register %u (code=0x%02X)",
              this->pending_register_, ex);
-    this->pending_register_ = 0;
-    this->pending_since_ms_ = 0;
-    this->poll_index_ = (this->poll_index_ + 1) % POLL_REGISTER_COUNT;
+    this->reset_poll_state();
     return;
   }
 
@@ -672,9 +642,7 @@ void BluettiRust::handle_decrypted_response(const uint8_t *data, size_t len) {
   }
 
   this->apply_register_value(this->pending_register_, value);
-  this->pending_register_ = 0;
-  this->pending_since_ms_ = 0;
-  this->poll_index_ = (this->poll_index_ + 1) % POLL_REGISTER_COUNT;
+  this->reset_poll_state();
 }
 
 void BluettiRust::apply_register_value(uint16_t reg_addr, uint16_t value) {

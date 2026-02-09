@@ -10,6 +10,9 @@
 namespace esphome {
 namespace bluetti_rust {
 
+// Forward declaration for helper struct
+struct OutputConfig;
+
 class BluettiRust : public Component, public ble_client::BLEClientNode {
 public:
   ~BluettiRust();
@@ -108,15 +111,37 @@ protected:
 
   void subscribe_notifications();
   void process_notification(const uint8_t *data, size_t len);
+  void handle_kex_message(const uint8_t *data, size_t len);
+  void handle_encrypted_message(const uint8_t *data, size_t len);
+  void handle_encrypted_kex(size_t decrypted_len);
   void poll_next_register();
   bool build_read_register_command(uint16_t reg_addr, uint16_t quantity,
                                    uint8_t *out, size_t *out_len) const;
   bool build_write_register_command(uint16_t reg_addr, uint16_t value,
                                     uint8_t *out, size_t *out_len) const;
+  bool build_modbus_command(uint8_t func_code, uint16_t reg_addr,
+                            uint16_t value, uint8_t *out,
+                            size_t *out_len) const;
   void mark_metrics_unavailable();
+  void reset_poll_state();
   void handle_decrypted_response(const uint8_t *data, size_t len);
   void apply_register_value(uint16_t reg_addr, uint16_t value);
   bool ble_write(const uint8_t *data, size_t len);
+  bool set_output(const OutputConfig &cfg, bool enabled);
+  void process_pending_toggle(const char *name, uint16_t reg, bool value,
+                              bool &pending_flag);
+};
+
+// Helper struct for output configuration (AC/DC)
+struct OutputConfig {
+  const char *name;
+  uint16_t reg;
+  uint32_t debounce_ms;
+  uint32_t &last_toggle_ms;
+  bool &state_known;
+  bool &enabled;
+  bool &pending;
+  bool &pending_value;
 };
 
 } // namespace bluetti_rust
