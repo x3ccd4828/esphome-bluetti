@@ -648,7 +648,7 @@ void BluettiRust::apply_register_value(uint16_t reg_addr, uint16_t value) {
         break;
     case REG_TIME_REMAINING:
         this->time_remaining_min_ =
-            (static_cast<float>(value) / 10000.0f) * 167.0f;
+            (static_cast<float>(value) / 4.0f) * 167.0f;
         break;
     case REG_DC_OUTPUT_POWER:
         this->dc_output_power_w_ = static_cast<float>(value);
