@@ -25,13 +25,3 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await ble_client.register_ble_node(var, config)
-
-    # Link the pre-compiled Rust static library
-    # Get the directory of this __init__.py file to find the library
-    import os
-    component_dir = os.path.dirname(os.path.realpath(__file__))
-    lib_dir = os.path.join(component_dir, "lib")
-    
-    cg.add_build_flag(f"-L{lib_dir}")
-    cg.add_build_flag("-lbluetti_encryption")
-    cg.add_library("bluetti_encryption", None)

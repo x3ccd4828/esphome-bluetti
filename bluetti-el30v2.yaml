@@ -37,8 +37,11 @@ esp32:
       loop_task_stack_size: 16384
 
 external_components:
-  - source: github://x3ccd4828/esphome-bluetti@main
-    refresh: 0s
+  # - source: github://x3ccd4828/esphome-bluetti@main
+  #   refresh: 0s
+  - source:
+      type: local
+      path: components
 
 logger:
   level: DEBUG

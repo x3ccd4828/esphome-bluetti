@@ -12,27 +12,13 @@ namespace bluetti_rust {
 static const char *const TAG = "bluetti_rust";
 
 BluettiRust::~BluettiRust() {
-    if (this->rust_ctx_ != nullptr) {
-        bluetti_free(this->rust_ctx_);
-        this->rust_ctx_ = nullptr;
-    }
+    // C++ encryption context cleans itself up
 }
 
 void BluettiRust::setup() {
-    ESP_LOGI(TAG, "Setting up Bluetti Rust wrapper");
+    ESP_LOGI(TAG, "Setting up Bluetti encryption wrapper");
 
-    this->rust_ctx_ = bluetti_init();
-    if (this->rust_ctx_ == nullptr) {
-        ESP_LOGE(TAG, "bluetti_init failed");
-        return;
-    }
-
-    const int32_t rc = bluetti_set_random_callback(
-        this->rust_ctx_, &BluettiRust::random_callback, this);
-    if (rc != BLUETTI_FFI_OK) {
-        ESP_LOGE(TAG, "bluetti_set_random_callback failed: %d", rc);
-    }
-
+    this->crypto_ctx_.reset();
     this->mark_metrics_unavailable();
     this->reset_poll_state();
 
@@ -41,14 +27,12 @@ void BluettiRust::setup() {
 }
 
 void BluettiRust::dump_config() {
-    ESP_LOGCONFIG(TAG, "Bluetti Rust:");
-    ESP_LOGCONFIG(TAG, "  Context: %s",
-                  this->rust_ctx_ != nullptr ? "OK" : "NULL");
+    ESP_LOGCONFIG(TAG, "Bluetti Encryption:");
     ESP_LOGCONFIG(TAG, "  Ready: %s", this->is_ready() ? "YES" : "NO");
 }
 
 bool BluettiRust::is_ready() const {
-    return this->rust_ctx_ != nullptr && bluetti_is_ready(this->rust_ctx_);
+    return this->crypto_ctx_.is_ready_for_commands();
 }
 
 void BluettiRust::gattc_event_handler(esp_gattc_cb_event_t event,
@@ -70,24 +54,7 @@ void BluettiRust::gattc_event_handler(esp_gattc_cb_event_t event,
         this->mark_metrics_unavailable();
         this->reset_poll_state();
         this->poll_index_ = 0;
-
-        if (this->rust_ctx_ != nullptr) {
-            bluetti_free(this->rust_ctx_);
-            this->rust_ctx_ = nullptr;
-        }
-
-        this->rust_ctx_ = bluetti_init();
-        if (this->rust_ctx_ == nullptr) {
-            ESP_LOGE(TAG, "bluetti_init failed after disconnect");
-            break;
-        }
-
-        if (bluetti_set_random_callback(this->rust_ctx_,
-                                        &BluettiRust::random_callback,
-                                        this) != BLUETTI_FFI_OK) {
-            ESP_LOGE(TAG,
-                     "bluetti_set_random_callback failed after disconnect");
-        }
+        this->crypto_ctx_.reset();
         break;
 
     case ESP_GATTC_SEARCH_CMPL_EVT:
@@ -150,7 +117,7 @@ void BluettiRust::subscribe_notifications() {
 }
 
 void BluettiRust::process_notification(const uint8_t *data, size_t len) {
-    if (this->rust_ctx_ == nullptr || data == nullptr || len < 2) {
+    if (data == nullptr || len < 2) {
         return;
     }
 
@@ -172,15 +139,17 @@ void BluettiRust::process_notification(const uint8_t *data, size_t len) {
 
 void BluettiRust::handle_kex_message(const uint8_t *data, size_t len) {
     size_t out_len = sizeof(this->tx_buffer_);
-    int32_t rc = BLUETTI_FFI_ERR_INVALID_INPUT;
+    bool success = false;
 
     switch (data[2]) {
     case 0x01: // Challenge
         this->awaiting_pubkey_accepted_ = false;
         this->cached_pubkey_response_len_ = 0;
-        rc = bluetti_handle_challenge(this->rust_ctx_, data, len,
-                                      this->tx_buffer_, &out_len);
-        if (rc == BLUETTI_FFI_OK && out_len > 0) {
+        success = this->crypto_ctx_.handle_challenge(
+            data + 4,
+            len - 6, // Skip magic(2) + type(1) + len(1) and checksum(2)
+            this->tx_buffer_, &out_len);
+        if (success && out_len > 0) {
             if (!this->ble_write(this->tx_buffer_, out_len)) {
                 ESP_LOGW(TAG, "Failed to write challenge response");
             }
@@ -202,9 +171,9 @@ void BluettiRust::handle_kex_message(const uint8_t *data, size_t len) {
             return;
         }
 
-        rc = bluetti_handle_peer_pubkey(this->rust_ctx_, data, len,
-                                        this->tx_buffer_, &out_len);
-        if (rc == BLUETTI_FFI_OK && out_len > 0) {
+        success = this->crypto_ctx_.handle_peer_pubkey(
+            data + 4, len - 6, this->tx_buffer_, &out_len);
+        if (success && out_len > 0) {
             std::memcpy(this->cached_pubkey_response_, this->tx_buffer_,
                         out_len);
             this->cached_pubkey_response_len_ = out_len;
@@ -216,8 +185,8 @@ void BluettiRust::handle_kex_message(const uint8_t *data, size_t len) {
         break;
 
     case 0x06: // Pubkey accepted
-        rc = bluetti_handle_pubkey_accepted(this->rust_ctx_, data, len);
-        if (rc == BLUETTI_FFI_OK && this->is_ready()) {
+        success = this->crypto_ctx_.handle_pubkey_accepted(data + 4, len - 6);
+        if (success && this->is_ready()) {
             ESP_LOGI(TAG, "Encryption handshake complete");
             this->reset_poll_state();
         }
@@ -228,17 +197,17 @@ void BluettiRust::handle_kex_message(const uint8_t *data, size_t len) {
         return;
     }
 
-    if (rc != BLUETTI_FFI_OK) {
-        ESP_LOGW(TAG, "Rust FFI call failed (msg=0x%02X rc=%d)", data[2], rc);
+    if (!success) {
+        ESP_LOGW(TAG, "KEX handling failed (msg=0x%02X)", data[2]);
     }
 }
 
 void BluettiRust::handle_encrypted_message(const uint8_t *data, size_t len) {
     size_t out_len = sizeof(this->tx_buffer_);
-    int32_t rc = bluetti_decrypt_response(this->rust_ctx_, data, len,
-                                          this->tx_buffer_, &out_len);
+    bool success = this->crypto_ctx_.decrypt_response(
+        data, len, this->tx_buffer_, &out_len);
 
-    if (rc != BLUETTI_FFI_OK) {
+    if (!success) {
         ESP_LOGVV(TAG, "Ignoring encrypted notification (%u bytes)",
                   static_cast<unsigned>(len));
         return;
@@ -263,7 +232,6 @@ void BluettiRust::handle_encrypted_message(const uint8_t *data, size_t len) {
 
 void BluettiRust::handle_encrypted_kex(size_t decrypted_len) {
     const uint8_t kex_type = this->tx_buffer_[2];
-    int32_t rc = BLUETTI_FFI_OK;
 
     switch (kex_type) {
     case 0x04: {
@@ -282,10 +250,12 @@ void BluettiRust::handle_encrypted_kex(size_t decrypted_len) {
         }
 
         size_t response_len = sizeof(this->tx_buffer_);
-        rc = bluetti_handle_peer_pubkey(this->rust_ctx_, this->tx_buffer_,
-                                        decrypted_len, this->tx_buffer_,
-                                        &response_len);
-        if (rc == BLUETTI_FFI_OK && response_len > 0) {
+        bool success = this->crypto_ctx_.handle_peer_pubkey(
+            this->tx_buffer_ + 4,
+            decrypted_len -
+                6, // Skip magic(2) + type(1) + len(1) and checksum(2)
+            this->tx_buffer_, &response_len);
+        if (success && response_len > 0) {
             std::memcpy(this->cached_pubkey_response_, this->tx_buffer_,
                         response_len);
             this->cached_pubkey_response_len_ = response_len;
@@ -295,20 +265,20 @@ void BluettiRust::handle_encrypted_kex(size_t decrypted_len) {
                          "Failed to write encrypted local pubkey response");
             }
         } else {
-            ESP_LOGW(TAG, "Peer pubkey handling failed (rc=%d)", rc);
+            ESP_LOGW(TAG, "Peer pubkey handling failed");
         }
         return;
     }
 
     case 0x06:
-        rc = bluetti_handle_pubkey_accepted(this->rust_ctx_, this->tx_buffer_,
-                                            decrypted_len);
-        if (rc == BLUETTI_FFI_OK && this->is_ready()) {
+        if (this->crypto_ctx_.handle_pubkey_accepted(this->tx_buffer_ + 4,
+                                                     decrypted_len - 6) &&
+            this->is_ready()) {
             ESP_LOGI(TAG, "Encryption handshake complete");
             this->awaiting_pubkey_accepted_ = false;
             this->cached_pubkey_response_len_ = 0;
-        } else if (rc != BLUETTI_FFI_OK) {
-            ESP_LOGW(TAG, "Pubkey accepted handling failed (rc=%d)", rc);
+        } else {
+            ESP_LOGW(TAG, "Pubkey accepted handling failed");
         }
         return;
 
@@ -341,7 +311,7 @@ bool BluettiRust::ble_write(const uint8_t *data, size_t len) {
 }
 
 bool BluettiRust::send_modbus_command(const uint8_t *data, size_t len) {
-    if (this->rust_ctx_ == nullptr || data == nullptr || len == 0) {
+    if (data == nullptr || len == 0) {
         return false;
     }
 
@@ -351,10 +321,9 @@ bool BluettiRust::send_modbus_command(const uint8_t *data, size_t len) {
     }
 
     size_t out_len = sizeof(this->tx_buffer_);
-    const int32_t rc = bluetti_encrypt_command(this->rust_ctx_, data, len,
-                                               this->tx_buffer_, &out_len);
-    if (rc != BLUETTI_FFI_OK || out_len == 0) {
-        ESP_LOGW(TAG, "Failed to encrypt MODBUS command (rc=%d)", rc);
+    if (!this->crypto_ctx_.encrypt_modbus_command(data, len, this->tx_buffer_,
+                                                  &out_len)) {
+        ESP_LOGW(TAG, "Failed to encrypt MODBUS command");
         return false;
     }
 
@@ -367,7 +336,7 @@ bool BluettiRust::send_modbus_command(const uint8_t *data, size_t len) {
 }
 
 bool BluettiRust::set_output(const OutputConfig &cfg, bool enabled) {
-    if (this->rust_ctx_ == nullptr || !this->is_ready()) {
+    if (!this->is_ready()) {
         ESP_LOGW(TAG, "Cannot toggle %s output before handshake is complete",
                  cfg.name);
         return false;
@@ -447,8 +416,8 @@ bool BluettiRust::set_dc_output(bool enabled) {
 void BluettiRust::poll_next_register() {
     const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
 
-    if (this->rust_ctx_ == nullptr || this->write_handle_ == 0 ||
-        !this->parent_->connected() || !this->is_ready()) {
+    if (this->write_handle_ == 0 || !this->parent_->connected() ||
+        !this->is_ready()) {
         return;
     }
 
@@ -699,18 +668,6 @@ uint16_t BluettiRust::modbus_crc16(const uint8_t *data, size_t len) {
     }
 
     return crc;
-}
-
-int32_t BluettiRust::random_callback(void *user_data, uint8_t *output,
-                                     size_t output_len) {
-    (void)user_data;
-
-    if (output == nullptr) {
-        return BLUETTI_FFI_ERR_NULL_POINTER;
-    }
-
-    esp_fill_random(output, output_len);
-    return BLUETTI_FFI_OK;
 }
 
 } // namespace bluetti_rust
