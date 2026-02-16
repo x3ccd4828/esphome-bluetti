@@ -39,11 +39,11 @@ esp32:
       CONFIG_MBEDTLS_MD5_C: y
 
 external_components:
-  # - source: github://x3ccd4828/esphome-bluetti@main
-  #   refresh: 0s
-  - source:
-      type: local
-      path: components
+  - source: github://x3ccd4828/esphome-bluetti@main
+    refresh: 0s
+  # - source:
+  #     type: local
+  #     path: components
 
 logger:
   level: DEBUG
