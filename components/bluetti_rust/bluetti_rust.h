@@ -1,6 +1,6 @@
 #pragma once
 
-#include "bluetti_ffi.h"
+#include "bluetti_encryption.h"
 
 #include "esphome/components/ble_client/ble_client.h"
 #include "esphome/core/component.h"
@@ -70,7 +70,7 @@ class BluettiRust : public Component, public ble_client::BLEClientNode {
     esp32_ble::ESPBTUUID write_char_uuid_{
         esp32_ble::ESPBTUUID::from_raw("0000FF02-0000-1000-8000-00805F9B34FB")};
 
-    BluettiContext *rust_ctx_{nullptr};
+    BluettiEncryption crypto_ctx_;
     uint16_t notify_handle_{0};
     uint16_t write_handle_{0};
     uint8_t tx_buffer_[TX_BUFFER_SIZE];
@@ -103,9 +103,6 @@ class BluettiRust : public Component, public ble_client::BLEClientNode {
     bool ac_output_state_known_{false};
     bool dc_output_enabled_{false};
     bool dc_output_state_known_{false};
-
-    static int32_t random_callback(void *user_data, uint8_t *output,
-                                   size_t output_len);
 
     static uint16_t modbus_crc16(const uint8_t *data, size_t len);
 
