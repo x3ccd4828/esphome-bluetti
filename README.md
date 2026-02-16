@@ -1,12 +1,12 @@
-# Bluetti EL30V2 ESPHome Integration (Rust)
+# Bluetti EL30V2 ESPHome Integration
 
-Complete implementation of Bluetti BLE encryption protocol for ESPHome using a Rust static library.
+Complete implementation of Bluetti BLE encryption protocol for ESPHome using a native C++ component.
 This project enables full monitoring and control of Bluetti EL30V2 (and compatible) devices via Home Assistant.
 
 ## 🚀 Features
 
 - **Secure BLE Handshake**: Full implementation of Bluetti's challenge-response + ECDH key exchange.
-- **Rust Core**: Crypto logic runs in a high-performance, memory-safe Rust static library (`no_std`).
+- **Native C++ Core**: Crypto logic runs inside the ESPHome component using mbedTLS.
 - **Full Telemetry**:
   - Battery %
   - AC/DC Output Power
@@ -23,48 +23,41 @@ This project enables full monitoring and control of Bluetti EL30V2 (and compatib
 ```
 bluetti-el30v2.yaml (ESPHome Config)
     ↓
-components/bluetti_rust/ (C++ Wrapper Component)
+components/bluetti_rust/ (ESPHome C++ component)
     ↓
-bluetti-encryption/ (Rust Library)
-    ↓
-libbluetti_encryption.a (Static Library linked via link_rust.py)
+mbedTLS (ESP-IDF crypto primitives)
 ```
 
 ## 📦 Quick Start
 
-### 1. Build the Rust Static Library
-
-You must build the Rust library before compiling ESPHome.
-Requires a Rust toolchain with `xtensa-esp32-none-elf` target support (e.g., `espup`).
-
-```bash
-# Inside the container or environment with ESP Rust toolchain:
-cargo +esp rustc \
-  -Z build-std=core,alloc \
-  --release \
-  --features c_ffi \
-  --target xtensa-esp32-none-elf \
-  --lib \
-  --crate-type staticlib
-```
-
-**Output artifact:**
-`bluetti-encryption/target/xtensa-esp32-none-elf/release/libbluetti_encryption.a`
-
-### 2. Configure ESPHome
+### 1. Configure ESPHome
 
 Edit `bluetti-el30v2.yaml` and update:
 
 - **WiFi SSID/Password**: `!secret wifi_ssid` / `!secret wifi_password`
 - **MAC Address**: Under `ble_client` -> `mac_address`
 
-### 3. Compile and Flash
+### 2. Compile and Flash
 
 ```bash
 esphome run bluetti-el30v2.yaml
 ```
 
-The build script `link_rust.py` automatically links the prebuilt Rust library.
+The component is self-contained and builds directly with ESPHome.
+
+### 3. Flash a prebuilt factory binary with espflash
+
+If you already have a compiled `firmware.factory.bin`, you can write it directly:
+
+```bash
+espflash write-bin --monitor --chip esp32 --baud 400000 0x0 <PATH_TO_BUILD_OUTPUT>/firmware.factory.bin
+```
+
+Example placeholder path:
+
+```bash
+espflash write-bin --monitor --chip esp32 --baud 400000 0x0 <WORKSPACE>/.esphome/build/bluetti-el30v2/.pioenvs/bluetti-el30v2/firmware.factory.bin
+```
 
 ## 📊 Home Assistant Entities
 
@@ -110,9 +103,9 @@ The build script `link_rust.py` automatically links the prebuilt Rust library.
 
 - **"Encryption not ready"**: Wait ~5-10s after boot for handshake.
 - **"MODBUS poll timeout"**: Check BLE signal strength (RSSI).
-- **"Linker error"**: Ensure you rebuilt the Rust staticlib after any Rust changes.
+- **"Linker/crypto build error"**: ensure ESP-IDF mbedTLS options are enabled in `bluetti-el30v2.yaml` and rebuild from clean.
 
 ## 📝 License
 
-This project combines ESPHome (GPL) and custom Rust components.
+This project combines ESPHome (GPL) and custom C++ components.
 Based on reverse-engineered protocol details. Use at your own risk.

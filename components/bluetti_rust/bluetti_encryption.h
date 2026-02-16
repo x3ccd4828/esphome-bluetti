@@ -88,6 +88,7 @@ class BluettiEncryption {
     void reset();
 
     // Key exchange handlers
+    bool precompute_ephemeral_keypair();
     bool handle_challenge(const uint8_t *data, size_t len, uint8_t *response,
                           size_t *response_len);
     bool handle_peer_pubkey(const uint8_t *data, size_t len, uint8_t *response,
@@ -95,6 +96,8 @@ class BluettiEncryption {
     bool handle_pubkey_accepted(const uint8_t *data, size_t len);
 
     // Encryption/Decryption
+    bool encrypt_unsecure_kex(const uint8_t *data, size_t len, uint8_t *output,
+                              size_t *output_len);
     bool encrypt_modbus_command(const uint8_t *data, size_t len,
                                 uint8_t *output, size_t *output_len);
     bool decrypt_response(const uint8_t *data, size_t len, uint8_t *output,

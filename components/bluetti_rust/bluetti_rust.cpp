@@ -19,6 +19,9 @@ void BluettiRust::setup() {
     ESP_LOGI(TAG, "Setting up Bluetti encryption wrapper");
 
     this->crypto_ctx_.reset();
+    if (!this->crypto_ctx_.precompute_ephemeral_keypair()) {
+        ESP_LOGW(TAG, "Failed to precompute ephemeral keypair at setup");
+    }
     this->mark_metrics_unavailable();
     this->reset_poll_state();
 
@@ -55,6 +58,10 @@ void BluettiRust::gattc_event_handler(esp_gattc_cb_event_t event,
         this->reset_poll_state();
         this->poll_index_ = 0;
         this->crypto_ctx_.reset();
+        if (!this->crypto_ctx_.precompute_ephemeral_keypair()) {
+            ESP_LOGW(TAG,
+                     "Failed to precompute ephemeral keypair after disconnect");
+        }
         break;
 
     case ESP_GATTC_SEARCH_CMPL_EVT:
@@ -138,6 +145,19 @@ void BluettiRust::process_notification(const uint8_t *data, size_t len) {
 }
 
 void BluettiRust::handle_kex_message(const uint8_t *data, size_t len) {
+    if (len < 6) {
+        ESP_LOGW(TAG, "KEX packet too short: %u", static_cast<unsigned>(len));
+        return;
+    }
+
+    const size_t payload_len = data[3];
+    if (len < payload_len + 6) {
+        ESP_LOGW(TAG, "Malformed KEX packet (len=%u payload=%u)",
+                 static_cast<unsigned>(len),
+                 static_cast<unsigned>(payload_len));
+        return;
+    }
+
     size_t out_len = sizeof(this->tx_buffer_);
     bool success = false;
 
@@ -146,9 +166,7 @@ void BluettiRust::handle_kex_message(const uint8_t *data, size_t len) {
         this->awaiting_pubkey_accepted_ = false;
         this->cached_pubkey_response_len_ = 0;
         success = this->crypto_ctx_.handle_challenge(
-            data + 4,
-            len - 6, // Skip magic(2) + type(1) + len(1) and checksum(2)
-            this->tx_buffer_, &out_len);
+            data + 4, payload_len, this->tx_buffer_, &out_len);
         if (success && out_len > 0) {
             if (!this->ble_write(this->tx_buffer_, out_len)) {
                 ESP_LOGW(TAG, "Failed to write challenge response");
@@ -172,7 +190,7 @@ void BluettiRust::handle_kex_message(const uint8_t *data, size_t len) {
         }
 
         success = this->crypto_ctx_.handle_peer_pubkey(
-            data + 4, len - 6, this->tx_buffer_, &out_len);
+            data + 4, payload_len, this->tx_buffer_, &out_len);
         if (success && out_len > 0) {
             std::memcpy(this->cached_pubkey_response_, this->tx_buffer_,
                         out_len);
@@ -185,7 +203,8 @@ void BluettiRust::handle_kex_message(const uint8_t *data, size_t len) {
         break;
 
     case 0x06: // Pubkey accepted
-        success = this->crypto_ctx_.handle_pubkey_accepted(data + 4, len - 6);
+        success =
+            this->crypto_ctx_.handle_pubkey_accepted(data + 4, payload_len);
         if (success && this->is_ready()) {
             ESP_LOGI(TAG, "Encryption handshake complete");
             this->reset_poll_state();
@@ -231,6 +250,20 @@ void BluettiRust::handle_encrypted_message(const uint8_t *data, size_t len) {
 }
 
 void BluettiRust::handle_encrypted_kex(size_t decrypted_len) {
+    if (decrypted_len < 6) {
+        ESP_LOGW(TAG, "Decrypted KEX packet too short: %u",
+                 static_cast<unsigned>(decrypted_len));
+        return;
+    }
+
+    const size_t payload_len = this->tx_buffer_[3];
+    if (decrypted_len < payload_len + 6) {
+        ESP_LOGW(TAG, "Malformed decrypted KEX packet (len=%u payload=%u)",
+                 static_cast<unsigned>(decrypted_len),
+                 static_cast<unsigned>(payload_len));
+        return;
+    }
+
     const uint8_t kex_type = this->tx_buffer_[2];
 
     switch (kex_type) {
@@ -251,16 +284,22 @@ void BluettiRust::handle_encrypted_kex(size_t decrypted_len) {
 
         size_t response_len = sizeof(this->tx_buffer_);
         bool success = this->crypto_ctx_.handle_peer_pubkey(
-            this->tx_buffer_ + 4,
-            decrypted_len -
-                6, // Skip magic(2) + type(1) + len(1) and checksum(2)
-            this->tx_buffer_, &response_len);
+            this->tx_buffer_ + 4, payload_len, this->tx_buffer_, &response_len);
         if (success && response_len > 0) {
-            std::memcpy(this->cached_pubkey_response_, this->tx_buffer_,
-                        response_len);
-            this->cached_pubkey_response_len_ = response_len;
+            uint8_t encrypted_response[TX_BUFFER_SIZE];
+            size_t encrypted_len = sizeof(encrypted_response);
+            if (!this->crypto_ctx_.encrypt_unsecure_kex(
+                    this->tx_buffer_, response_len, encrypted_response,
+                    &encrypted_len)) {
+                ESP_LOGW(TAG, "Failed to encrypt local pubkey response");
+                return;
+            }
+
+            std::memcpy(this->cached_pubkey_response_, encrypted_response,
+                        encrypted_len);
+            this->cached_pubkey_response_len_ = encrypted_len;
             this->awaiting_pubkey_accepted_ = true;
-            if (!this->ble_write(this->tx_buffer_, response_len)) {
+            if (!this->ble_write(encrypted_response, encrypted_len)) {
                 ESP_LOGW(TAG,
                          "Failed to write encrypted local pubkey response");
             }
@@ -272,7 +311,7 @@ void BluettiRust::handle_encrypted_kex(size_t decrypted_len) {
 
     case 0x06:
         if (this->crypto_ctx_.handle_pubkey_accepted(this->tx_buffer_ + 4,
-                                                     decrypted_len - 6) &&
+                                                     payload_len) &&
             this->is_ready()) {
             ESP_LOGI(TAG, "Encryption handshake complete");
             this->awaiting_pubkey_accepted_ = false;

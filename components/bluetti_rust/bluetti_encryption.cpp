@@ -12,6 +12,13 @@ namespace bluetti_rust {
 
 static const char *const TAG = "bluetti_encryption";
 
+static int esp_random_callback(void *ctx, unsigned char *output,
+                               size_t output_len) {
+    (void)ctx;
+    esp_fill_random(output, output_len);
+    return 0;
+}
+
 // ============================================================================
 // BluettiMessage Implementation
 // ============================================================================
@@ -137,6 +144,13 @@ void BluettiEncryption::reset() {
     my_keypair_set_ = false;
 }
 
+bool BluettiEncryption::precompute_ephemeral_keypair() {
+    if (my_keypair_set_) {
+        return true;
+    }
+    return generate_ephemeral_keypair();
+}
+
 bool BluettiEncryption::handle_challenge(const uint8_t *data, size_t len,
                                          uint8_t *response,
                                          size_t *response_len) {
@@ -164,7 +178,7 @@ bool BluettiEncryption::handle_challenge(const uint8_t *data, size_t len,
     ESP_LOGI(TAG, "Challenge handled, unsecure keys derived");
 
     // Build response: MAGIC + TYPE(0x02) + LEN(4) + IV[8..12] + CHECKSUM
-    if (*response_len < 8) {
+    if (*response_len < 10) {
         return false;
     }
 
@@ -178,10 +192,10 @@ bool BluettiEncryption::handle_challenge(const uint8_t *data, size_t len,
 
     // Calculate checksum of body (bytes 2-7)
     uint16_t checksum = hexsum(response + 2, 6);
-    response[6] = (checksum >> 8) & 0xFF;
-    response[7] = checksum & 0xFF;
+    response[8] = (checksum >> 8) & 0xFF;
+    response[9] = checksum & 0xFF;
 
-    *response_len = 8;
+    *response_len = 10;
     return true;
 }
 
@@ -281,11 +295,9 @@ bool BluettiEncryption::aes_decrypt(const uint8_t *data, size_t len,
 // Phase 3: ECDH/ECDSA Implementation
 // ============================================================================
 
-#include <mbedtls/ctr_drbg.h>
 #include <mbedtls/ecdh.h>
 #include <mbedtls/ecdsa.h>
 #include <mbedtls/ecp.h>
-#include <mbedtls/entropy.h>
 #include <mbedtls/sha256.h>
 
 bool BluettiEncryption::verify_peer_signature(const uint8_t *pubkey,
@@ -303,14 +315,17 @@ bool BluettiEncryption::verify_peer_signature(const uint8_t *pubkey,
         return false;
     }
 
-    // Extract K2 public key bytes (last 64 bytes of the ASN.1 encoded key)
-    uint8_t k2_pubkey_raw[64];
-    memcpy(k2_pubkey_raw, PUBLIC_KEY_K2_BYTES.data() + 27, 64);
+    // Extract K2 public key from SubjectPublicKeyInfo bytes.
+    // mbedtls_ecp_point_read_binary expects SEC1 encoding with 0x04 prefix.
+    uint8_t k2_pubkey_full[SEC1_UNCOMPRESSED_PUBKEY_LEN];
+    k2_pubkey_full[0] = SEC1_UNCOMPRESSED_TAG;
+    memcpy(k2_pubkey_full + 1, PUBLIC_KEY_K2_BYTES.data() + 27, PUBKEY_LEN);
 
     // Read the K2 public key
     mbedtls_ecp_point k2_pubkey;
     mbedtls_ecp_point_init(&k2_pubkey);
-    ret = mbedtls_ecp_point_read_binary(&grp, &k2_pubkey, k2_pubkey_raw, 64);
+    ret = mbedtls_ecp_point_read_binary(&grp, &k2_pubkey, k2_pubkey_full,
+                                        SEC1_UNCOMPRESSED_PUBKEY_LEN);
     if (ret != 0) {
         ESP_LOGE(TAG, "Failed to read K2 public key");
         mbedtls_ecp_point_free(&k2_pubkey);
@@ -388,38 +403,19 @@ bool BluettiEncryption::generate_ephemeral_keypair() {
         return false;
     }
 
-    mbedtls_entropy_context entropy;
-    mbedtls_ctr_drbg_context ctr_drbg;
-    const char *pers = "bluetti_ecdh";
-
-    mbedtls_entropy_init(&entropy);
-    mbedtls_ctr_drbg_init(&ctr_drbg);
-
-    ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
-                                (const unsigned char *)pers, strlen(pers));
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to seed RNG");
-        mbedtls_ctr_drbg_free(&ctr_drbg);
-        mbedtls_entropy_free(&entropy);
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
     // Generate ephemeral keypair
     mbedtls_ecp_point pubkey;
     mbedtls_mpi privkey;
     mbedtls_ecp_point_init(&pubkey);
     mbedtls_mpi_init(&privkey);
 
-    ret = mbedtls_ecp_gen_keypair(&grp, &privkey, &pubkey,
-                                  mbedtls_ctr_drbg_random, &ctr_drbg);
+    ret = mbedtls_ecp_gen_keypair(&grp, &privkey, &pubkey, &esp_random_callback,
+                                  nullptr);
 
     if (ret != 0) {
         ESP_LOGE(TAG, "Failed to generate ephemeral keypair");
         mbedtls_mpi_free(&privkey);
         mbedtls_ecp_point_free(&pubkey);
-        mbedtls_ctr_drbg_free(&ctr_drbg);
-        mbedtls_entropy_free(&entropy);
         mbedtls_ecp_group_free(&grp);
         return false;
     }
@@ -430,8 +426,6 @@ bool BluettiEncryption::generate_ephemeral_keypair() {
         ESP_LOGE(TAG, "Failed to export private key");
         mbedtls_mpi_free(&privkey);
         mbedtls_ecp_point_free(&pubkey);
-        mbedtls_ctr_drbg_free(&ctr_drbg);
-        mbedtls_entropy_free(&entropy);
         mbedtls_ecp_group_free(&grp);
         return false;
     }
@@ -447,8 +441,6 @@ bool BluettiEncryption::generate_ephemeral_keypair() {
         ESP_LOGE(TAG, "Failed to export public key");
         mbedtls_mpi_free(&privkey);
         mbedtls_ecp_point_free(&pubkey);
-        mbedtls_ctr_drbg_free(&ctr_drbg);
-        mbedtls_entropy_free(&entropy);
         mbedtls_ecp_group_free(&grp);
         return false;
     }
@@ -459,8 +451,6 @@ bool BluettiEncryption::generate_ephemeral_keypair() {
 
     mbedtls_mpi_free(&privkey);
     mbedtls_ecp_point_free(&pubkey);
-    mbedtls_ctr_drbg_free(&ctr_drbg);
-    mbedtls_entropy_free(&entropy);
     mbedtls_ecp_group_free(&grp);
 
     ESP_LOGI(TAG, "Ephemeral keypair generated");
@@ -514,10 +504,10 @@ bool BluettiEncryption::derive_secure_key() {
     // Perform ECDH: shared_secret = privkey * peer_pubkey
     mbedtls_ecp_point shared_secret;
     mbedtls_ecp_point_init(&shared_secret);
-    ret = mbedtls_ecp_mul(&grp, &shared_secret, &privkey, &peer_pubkey, nullptr,
-                          nullptr);
+    ret = mbedtls_ecp_mul(&grp, &shared_secret, &privkey, &peer_pubkey,
+                          &esp_random_callback, nullptr);
     if (ret != 0) {
-        ESP_LOGE(TAG, "ECDH multiplication failed");
+        ESP_LOGE(TAG, "ECDH multiplication failed (ret=%d)", ret);
         mbedtls_ecp_point_free(&shared_secret);
         mbedtls_ecp_point_free(&peer_pubkey);
         mbedtls_mpi_free(&privkey);
@@ -575,8 +565,8 @@ bool BluettiEncryption::handle_peer_pubkey(const uint8_t *data, size_t len,
 
     ESP_LOGI(TAG, "Peer public key stored");
 
-    // Generate our ephemeral keypair
-    if (!generate_ephemeral_keypair()) {
+    // Ensure we have a local ephemeral keypair ready.
+    if (!precompute_ephemeral_keypair()) {
         return false;
     }
 
@@ -600,19 +590,6 @@ bool BluettiEncryption::handle_peer_pubkey(const uint8_t *data, size_t len,
         return false;
     }
 
-    // Compute L1 public key
-    mbedtls_ecp_point l1_pubkey;
-    mbedtls_ecp_point_init(&l1_pubkey);
-    ret = mbedtls_ecp_mul(&grp, &l1_pubkey, &l1_privkey, &grp.G, nullptr,
-                          nullptr);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to compute L1 public key");
-        mbedtls_ecp_point_free(&l1_pubkey);
-        mbedtls_mpi_free(&l1_privkey);
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
     // Create data to sign: my_pubkey + unsecure_iv
     uint8_t data_to_sign[80];
     memcpy(data_to_sign, my_pubkey_.data(), 64);
@@ -627,20 +604,9 @@ bool BluettiEncryption::handle_peer_pubkey(const uint8_t *data, size_t len,
     mbedtls_mpi_init(&r);
     mbedtls_mpi_init(&s);
 
-    mbedtls_entropy_context entropy;
-    mbedtls_ctr_drbg_context ctr_drbg;
-    const char *pers = "bluetti_sign";
-    mbedtls_entropy_init(&entropy);
-    mbedtls_ctr_drbg_init(&ctr_drbg);
-    mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
-                          (const unsigned char *)pers, strlen(pers));
-
     ret = mbedtls_ecdsa_sign(&grp, &r, &s, &l1_privkey, hash, sizeof(hash),
-                             mbedtls_ctr_drbg_random, &ctr_drbg);
+                             &esp_random_callback, nullptr);
 
-    mbedtls_ctr_drbg_free(&ctr_drbg);
-    mbedtls_entropy_free(&entropy);
-    mbedtls_ecp_point_free(&l1_pubkey);
     mbedtls_mpi_free(&l1_privkey);
     mbedtls_ecp_group_free(&grp);
 
@@ -672,8 +638,8 @@ bool BluettiEncryption::handle_peer_pubkey(const uint8_t *data, size_t len,
     response[3] = sizeof(payload);
     memcpy(response + 4, payload, sizeof(payload));
 
-    // Calculate and append checksum
-    uint16_t checksum = hexsum(response + 2, 4 + sizeof(payload));
+    // Calculate and append checksum over TYPE + LEN + PAYLOAD.
+    uint16_t checksum = hexsum(response + 2, 2 + sizeof(payload));
     response[4 + sizeof(payload)] = (checksum >> 8) & 0xFF;
     response[4 + sizeof(payload) + 1] = checksum & 0xFF;
 
@@ -696,6 +662,33 @@ bool BluettiEncryption::handle_pubkey_accepted(const uint8_t *data,
     }
 
     ESP_LOGI(TAG, "Encryption handshake complete - secure key established");
+    return true;
+}
+
+bool BluettiEncryption::encrypt_unsecure_kex(const uint8_t *data, size_t len,
+                                             uint8_t *output,
+                                             size_t *output_len) {
+    if (!unsecure_key_set_ || !unsecure_iv_set_) {
+        ESP_LOGE(TAG, "Cannot encrypt KEX response: unsecure key not ready");
+        return false;
+    }
+
+    uint8_t encrypted[512];
+    size_t encrypted_len = sizeof(encrypted);
+    if (!aes_encrypt(data, len, unsecure_aes_key_.data(), 16,
+                     unsecure_aes_iv_.data(), encrypted, &encrypted_len)) {
+        return false;
+    }
+
+    if (*output_len < encrypted_len + 2) {
+        ESP_LOGE(TAG, "Output buffer too small for encrypted KEX response");
+        return false;
+    }
+
+    output[0] = (len >> 8) & 0xFF;
+    output[1] = len & 0xFF;
+    memcpy(output + 2, encrypted, encrypted_len);
+    *output_len = encrypted_len + 2;
     return true;
 }
 
@@ -777,12 +770,13 @@ bool BluettiEncryption::decrypt_response(const uint8_t *data, size_t len,
         return false;
     }
 
-    // Verify decrypted length matches expected
+    // Trim zero padding using the plaintext length prefix.
     if (decrypted_len < data_len) {
         ESP_LOGW(TAG, "Decrypted data shorter than expected");
+        return false;
     }
 
-    *output_len = decrypted_len;
+    *output_len = data_len;
     return true;
 }
 
