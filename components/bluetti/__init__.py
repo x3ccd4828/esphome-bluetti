@@ -4,17 +4,15 @@ from esphome.components import ble_client, esp32
 from esphome.const import CONF_ID
 
 DEPENDENCIES = ["ble_client"]
-DOMAIN = "bluetti_rust"
+DOMAIN = "bluetti"
 
-bluetti_rust_ns = cg.esphome_ns.namespace("bluetti_rust")
-BluettiRust = bluetti_rust_ns.class_(
-    "BluettiRust", cg.Component, ble_client.BLEClientNode
-)
+bluetti_ns = cg.esphome_ns.namespace("bluetti")
+Bluetti = bluetti_ns.class_("Bluetti", cg.Component, ble_client.BLEClientNode)
 
 CONFIG_SCHEMA = (
     cv.Schema(
         {
-            cv.GenerateID(): cv.declare_id(BluettiRust),
+            cv.GenerateID(): cv.declare_id(Bluetti),
         }
     )
     .extend(ble_client.BLE_CLIENT_SCHEMA)

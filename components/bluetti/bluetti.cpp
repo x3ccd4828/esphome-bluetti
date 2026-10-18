@@ -1,4 +1,4 @@
-#include "bluetti_rust.h"
+#include "bluetti.h"
 
 #include "esphome/core/log.h"
 
@@ -7,15 +7,15 @@
 #include <esp_timer.h>
 
 namespace esphome {
-namespace bluetti_rust {
+namespace bluetti {
 
-static const char *const TAG = "bluetti_rust";
+static const char *const TAG = "bluetti";
 
-BluettiRust::~BluettiRust() {
+Bluetti::~Bluetti() {
     // C++ encryption context cleans itself up
 }
 
-void BluettiRust::setup() {
+void Bluetti::setup() {
     ESP_LOGI(TAG, "Setting up Bluetti encryption wrapper");
 
     this->crypto_ctx_.reset();
@@ -29,16 +29,16 @@ void BluettiRust::setup() {
                        [this]() { this->poll_next_register(); });
 }
 
-void BluettiRust::dump_config() {
+void Bluetti::dump_config() {
     ESP_LOGCONFIG(TAG, "Bluetti Encryption:");
     ESP_LOGCONFIG(TAG, "  Ready: %s", this->is_ready() ? "YES" : "NO");
 }
 
-bool BluettiRust::is_ready() const {
+bool Bluetti::is_ready() const {
     return this->crypto_ctx_.is_ready_for_commands();
 }
 
-void BluettiRust::gattc_event_handler(esp_gattc_cb_event_t event,
+void Bluetti::gattc_event_handler(esp_gattc_cb_event_t event,
                                       esp_gatt_if_t gattc_if,
                                       esp_ble_gattc_cb_param_t *param) {
     (void)gattc_if;
@@ -93,7 +93,7 @@ void BluettiRust::gattc_event_handler(esp_gattc_cb_event_t event,
     }
 }
 
-void BluettiRust::subscribe_notifications() {
+void Bluetti::subscribe_notifications() {
     auto *notify_chr = this->parent_->get_characteristic(
         this->service_uuid_, this->notify_char_uuid_);
     if (notify_chr == nullptr) {
@@ -123,7 +123,7 @@ void BluettiRust::subscribe_notifications() {
     ESP_LOGI(TAG, "Write characteristic found");
 }
 
-void BluettiRust::process_notification(const uint8_t *data, size_t len) {
+void Bluetti::process_notification(const uint8_t *data, size_t len) {
     if (data == nullptr || len < 2) {
         return;
     }
@@ -144,7 +144,7 @@ void BluettiRust::process_notification(const uint8_t *data, size_t len) {
     this->handle_encrypted_message(data, len);
 }
 
-void BluettiRust::handle_kex_message(const uint8_t *data, size_t len) {
+void Bluetti::handle_kex_message(const uint8_t *data, size_t len) {
     if (len < 6) {
         ESP_LOGW(TAG, "KEX packet too short: %u", static_cast<unsigned>(len));
         return;
@@ -221,7 +221,7 @@ void BluettiRust::handle_kex_message(const uint8_t *data, size_t len) {
     }
 }
 
-void BluettiRust::handle_encrypted_message(const uint8_t *data, size_t len) {
+void Bluetti::handle_encrypted_message(const uint8_t *data, size_t len) {
     size_t out_len = sizeof(this->tx_buffer_);
     bool success = this->crypto_ctx_.decrypt_response(
         data, len, this->tx_buffer_, &out_len);
@@ -249,7 +249,7 @@ void BluettiRust::handle_encrypted_message(const uint8_t *data, size_t len) {
     this->handle_decrypted_response(this->tx_buffer_, out_len);
 }
 
-void BluettiRust::handle_encrypted_kex(size_t decrypted_len) {
+void Bluetti::handle_encrypted_kex(size_t decrypted_len) {
     if (decrypted_len < 6) {
         ESP_LOGW(TAG, "Decrypted KEX packet too short: %u",
                  static_cast<unsigned>(decrypted_len));
@@ -328,7 +328,7 @@ void BluettiRust::handle_encrypted_kex(size_t decrypted_len) {
     }
 }
 
-bool BluettiRust::ble_write(const uint8_t *data, size_t len) {
+bool Bluetti::ble_write(const uint8_t *data, size_t len) {
     if (this->write_handle_ == 0) {
         ESP_LOGE(TAG, "Write handle is not initialized");
         return false;
@@ -349,7 +349,7 @@ bool BluettiRust::ble_write(const uint8_t *data, size_t len) {
     return true;
 }
 
-bool BluettiRust::send_modbus_command(const uint8_t *data, size_t len) {
+bool Bluetti::send_modbus_command(const uint8_t *data, size_t len) {
     if (data == nullptr || len == 0) {
         return false;
     }
@@ -374,7 +374,7 @@ bool BluettiRust::send_modbus_command(const uint8_t *data, size_t len) {
     return true;
 }
 
-bool BluettiRust::set_output(const OutputConfig &cfg, bool enabled) {
+bool Bluetti::set_output(const OutputConfig &cfg, bool enabled) {
     if (!this->is_ready()) {
         ESP_LOGW(TAG, "Cannot toggle %s output before handshake is complete",
                  cfg.name);
@@ -424,7 +424,7 @@ bool BluettiRust::set_output(const OutputConfig &cfg, bool enabled) {
     return true;
 }
 
-bool BluettiRust::set_ac_output(bool enabled) {
+bool Bluetti::set_ac_output(bool enabled) {
     OutputConfig cfg{
         .name = "AC",
         .reg = REG_CTRL_AC_OUTPUT,
@@ -438,7 +438,7 @@ bool BluettiRust::set_ac_output(bool enabled) {
     return this->set_output(cfg, enabled);
 }
 
-bool BluettiRust::set_dc_output(bool enabled) {
+bool Bluetti::set_dc_output(bool enabled) {
     OutputConfig cfg{
         .name = "DC",
         .reg = REG_CTRL_DC_OUTPUT,
@@ -452,7 +452,7 @@ bool BluettiRust::set_dc_output(bool enabled) {
     return this->set_output(cfg, enabled);
 }
 
-void BluettiRust::poll_next_register() {
+void Bluetti::poll_next_register() {
     const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
 
     if (this->write_handle_ == 0 || !this->parent_->connected() ||
@@ -509,7 +509,7 @@ void BluettiRust::poll_next_register() {
     }
 }
 
-void BluettiRust::process_pending_toggle(const char *name, uint16_t reg,
+void Bluetti::process_pending_toggle(const char *name, uint16_t reg,
                                          bool value, bool &pending_flag) {
     size_t cmd_len = sizeof(this->cmd_buffer_);
     const uint16_t int_value = value ? 1 : 0;
@@ -528,19 +528,19 @@ void BluettiRust::process_pending_toggle(const char *name, uint16_t reg,
     ESP_LOGI(TAG, "%s output toggle requested: %s", name, value ? "ON" : "OFF");
 }
 
-bool BluettiRust::build_read_register_command(uint16_t reg_addr,
+bool Bluetti::build_read_register_command(uint16_t reg_addr,
                                               uint16_t quantity, uint8_t *out,
                                               size_t *out_len) const {
     return this->build_modbus_command(0x03, reg_addr, quantity, out, out_len);
 }
 
-bool BluettiRust::build_write_register_command(uint16_t reg_addr,
+bool Bluetti::build_write_register_command(uint16_t reg_addr,
                                                uint16_t value, uint8_t *out,
                                                size_t *out_len) const {
     return this->build_modbus_command(0x06, reg_addr, value, out, out_len);
 }
 
-bool BluettiRust::build_modbus_command(uint8_t func_code, uint16_t reg_addr,
+bool Bluetti::build_modbus_command(uint8_t func_code, uint16_t reg_addr,
                                        uint16_t value, uint8_t *out,
                                        size_t *out_len) const {
     if (out == nullptr || out_len == nullptr || *out_len < 8) {
@@ -562,7 +562,7 @@ bool BluettiRust::build_modbus_command(uint8_t func_code, uint16_t reg_addr,
     return true;
 }
 
-void BluettiRust::mark_metrics_unavailable() {
+void Bluetti::mark_metrics_unavailable() {
     this->battery_soc_ = NAN;
     this->time_remaining_min_ = -1;
     this->dc_output_power_w_ = NAN;
@@ -576,7 +576,7 @@ void BluettiRust::mark_metrics_unavailable() {
     this->dc_output_state_known_ = false;
 }
 
-void BluettiRust::reset_poll_state() {
+void Bluetti::reset_poll_state() {
     this->pending_register_ = 0;
     this->pending_since_ms_ = 0;
     // Don't reset poll_index_ here - it should advance after successful reads
@@ -588,7 +588,7 @@ void BluettiRust::reset_poll_state() {
     this->cached_pubkey_response_len_ = 0;
 }
 
-void BluettiRust::handle_decrypted_response(const uint8_t *data, size_t len) {
+void Bluetti::handle_decrypted_response(const uint8_t *data, size_t len) {
     if (data == nullptr || len < 5) {
         ESP_LOGV(TAG, "Response too short: %u bytes",
                  static_cast<unsigned>(len));
@@ -655,7 +655,7 @@ void BluettiRust::handle_decrypted_response(const uint8_t *data, size_t len) {
     this->poll_index_ = (this->poll_index_ + 1) % POLL_REGISTER_COUNT;
 }
 
-void BluettiRust::apply_register_value(uint16_t reg_addr, uint16_t value) {
+void Bluetti::apply_register_value(uint16_t reg_addr, uint16_t value) {
     switch (reg_addr) {
     case REG_BATTERY_SOC:
         this->battery_soc_ = static_cast<float>(value);
@@ -693,7 +693,7 @@ void BluettiRust::apply_register_value(uint16_t reg_addr, uint16_t value) {
     ESP_LOGVV(TAG, "Updated register %u => %u", reg_addr, value);
 }
 
-uint16_t BluettiRust::modbus_crc16(const uint8_t *data, size_t len) {
+uint16_t Bluetti::modbus_crc16(const uint8_t *data, size_t len) {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < len; ++i) {
         crc ^= data[i];
@@ -709,5 +709,5 @@ uint16_t BluettiRust::modbus_crc16(const uint8_t *data, size_t len) {
     return crc;
 }
 
-} // namespace bluetti_rust
+} // namespace bluetti
 } // namespace esphome

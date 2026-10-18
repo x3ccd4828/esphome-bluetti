@@ -16,7 +16,7 @@ Convert the Rust encryption library (`bluetti-encryption`) to pure C++ code to e
 - Uses crates: aes, cbc, p256, md-5, heapless, rand_core
 
 ## Target State
-- Pure C++ implementation in `components/bluetti_rust/`
+- Pure C++ implementation in `components/bluetti/`
 - Uses ESP-IDF's built-in mbedTLS for crypto operations
 - No external library dependencies
 - Simpler build process
@@ -26,8 +26,8 @@ Convert the Rust encryption library (`bluetti-encryption`) to pure C++ code to e
 ## Phase 1: Core Data Structures
 
 ### Files to Modify
-- `components/bluetti_rust/bluetti_encryption.h` (new)
-- `components/bluetti_rust/bluetti_encryption.cpp` (new)
+- `components/bluetti/bluetti_encryption.h` (new)
+- `components/bluetti/bluetti_encryption.cpp` (new)
 
 ### Tasks
 1. Port all constants from Rust:
@@ -145,7 +145,7 @@ Convert the Rust encryption library (`bluetti-encryption`) to pure C++ code to e
 ## Phase 5: Integration
 
 ### Tasks
-1. **Update bluetti_rust.h/cpp**
+1. **Update bluetti.h/cpp**
    - Remove FFI header include
    - Add BluettiEncryption member variable
    - Replace FFI calls with direct method calls
@@ -156,8 +156,8 @@ Convert the Rust encryption library (`bluetti-encryption`) to pure C++ code to e
 
 3. **Remove Files**
    - `link_rust.py`
-   - `components/bluetti_rust/lib/libbluetti_encryption.a`
-   - `components/bluetti_rust/bluetti_ffi.h`
+   - `components/bluetti/lib/libbluetti_encryption.a`
+   - `components/bluetti/bluetti_ffi.h`
    - `bluetti-encryption/` directory (optional - can keep for reference)
 
 4. **Update README.md**

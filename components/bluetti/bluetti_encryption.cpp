@@ -8,7 +8,7 @@
 #include <mbedtls/md5.h>
 
 namespace esphome {
-namespace bluetti_rust {
+namespace bluetti {
 
 static const char *const TAG = "bluetti_encryption";
 
@@ -780,5 +780,5 @@ bool BluettiEncryption::decrypt_response(const uint8_t *data, size_t len,
     return true;
 }
 
-} // namespace bluetti_rust
+} // namespace bluetti
 } // namespace esphome

@@ -38,7 +38,7 @@ esp32:
 
 external_components:
   - source: github://x3ccd4828/esphome-bluetti@main
-    components: [bluetti_rust]
+    components: [bluetti]
     refresh: 0s
 
 logger:
@@ -77,7 +77,7 @@ ble_client:
   - mac_address: "A8:46:74:31:18:12"
     id: bluetti_el30v2
 
-bluetti_rust:
+bluetti:
   id: bluetti_handler
   ble_client_id: bluetti_el30v2
 

@@ -8,14 +8,14 @@
 #include <cmath>
 
 namespace esphome {
-namespace bluetti_rust {
+namespace bluetti {
 
 // Forward declaration for helper struct
 struct OutputConfig;
 
-class BluettiRust : public Component, public ble_client::BLEClientNode {
+class Bluetti : public Component, public ble_client::BLEClientNode {
   public:
-    ~BluettiRust();
+    ~Bluetti();
 
     void setup() override;
     void dump_config() override;
@@ -141,5 +141,5 @@ struct OutputConfig {
     bool &pending_value;
 };
 
-} // namespace bluetti_rust
+} // namespace bluetti
 } // namespace esphome

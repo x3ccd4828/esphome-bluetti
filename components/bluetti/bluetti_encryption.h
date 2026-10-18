@@ -6,7 +6,7 @@
 #include <cstring>
 
 namespace esphome {
-namespace bluetti_rust {
+namespace bluetti {
 
 // Constants from Rust implementation
 constexpr uint8_t KEX_MAGIC[2] = {0x2A, 0x2A};
@@ -140,5 +140,5 @@ class BluettiEncryption {
                      size_t *output_len);
 };
 
-} // namespace bluetti_rust
+} // namespace bluetti
 } // namespace esphome

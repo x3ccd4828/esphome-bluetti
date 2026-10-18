@@ -23,7 +23,7 @@ This project enables full monitoring and control of Bluetti EL30V2 (and compatib
 ```
 bluetti-el30v2.yaml (ESPHome Config)
     ↓
-components/bluetti_rust/ (native C++ ESPHome component)
+components/bluetti/ (native C++ ESPHome component)
     ↓
 mbedTLS (ESP-IDF crypto primitives)
 ```
@@ -33,9 +33,8 @@ mbedTLS (ESP-IDF crypto primitives)
 ### 1. Configure ESPHome
 
 Use ESPHome **2026.9.1 or newer**, an ESP32 board with BLE, and the ESP-IDF
-framework. The component builds directly with ESPHome. The existing
-`bluetti_rust` component name is retained for configuration compatibility;
-the implementation uses C++ and has no Rust library or toolchain dependency.
+framework. The component builds directly with ESPHome. The
+`bluetti` component uses C++ and has no Rust library or toolchain dependency.
 
 Edit `bluetti-el30v2.yaml` and update:
 
@@ -67,9 +66,15 @@ The configuration downloads the C++ component from GitHub:
 ```yaml
 external_components:
   - source: github://x3ccd4828/esphome-bluetti@main
-    components: [bluetti_rust]
+    components: [bluetti]
     refresh: 0s
 ```
+
+For configurations using the earlier C++ branch, change
+`components: [bluetti_rust]` to `components: [bluetti]` and the top-level
+`bluetti_rust:` key to `bluetti:`. Keep the component's existing `id` and
+`ble_client_id` values. The component files, C++ class, namespace, and log tag
+are now named `bluetti`.
 
 On another machine, you only need `bluetti-el30v2.yaml`, your own `secrets.yaml`,
 ESPHome, and internet access. No local `components/` directory, repository clone,
