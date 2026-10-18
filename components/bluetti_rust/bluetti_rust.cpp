@@ -2,6 +2,7 @@
 
 #include "esphome/core/log.h"
 
+#include <cinttypes>
 #include <cstring>
 #include <esp_random.h>
 #include <esp_timer.h>
@@ -30,7 +31,7 @@ void BluettiRust::setup() {
     const int32_t rc = bluetti_set_random_callback(
         this->rust_ctx_, &BluettiRust::random_callback, this);
     if (rc != BLUETTI_FFI_OK) {
-        ESP_LOGE(TAG, "bluetti_set_random_callback failed: %d", rc);
+        ESP_LOGE(TAG, "bluetti_set_random_callback failed: %" PRId32, rc);
     }
 
     this->mark_metrics_unavailable();
@@ -229,7 +230,7 @@ void BluettiRust::handle_kex_message(const uint8_t *data, size_t len) {
     }
 
     if (rc != BLUETTI_FFI_OK) {
-        ESP_LOGW(TAG, "Rust FFI call failed (msg=0x%02X rc=%d)", data[2], rc);
+        ESP_LOGW(TAG, "Rust FFI call failed (msg=0x%02X rc=%" PRId32 ")", data[2], rc);
     }
 }
 
@@ -295,7 +296,7 @@ void BluettiRust::handle_encrypted_kex(size_t decrypted_len) {
                          "Failed to write encrypted local pubkey response");
             }
         } else {
-            ESP_LOGW(TAG, "Peer pubkey handling failed (rc=%d)", rc);
+            ESP_LOGW(TAG, "Peer pubkey handling failed (rc=%" PRId32 ")", rc);
         }
         return;
     }
@@ -308,7 +309,7 @@ void BluettiRust::handle_encrypted_kex(size_t decrypted_len) {
             this->awaiting_pubkey_accepted_ = false;
             this->cached_pubkey_response_len_ = 0;
         } else if (rc != BLUETTI_FFI_OK) {
-            ESP_LOGW(TAG, "Pubkey accepted handling failed (rc=%d)", rc);
+            ESP_LOGW(TAG, "Pubkey accepted handling failed (rc=%" PRId32 ")", rc);
         }
         return;
 
@@ -354,7 +355,7 @@ bool BluettiRust::send_modbus_command(const uint8_t *data, size_t len) {
     const int32_t rc = bluetti_encrypt_command(this->rust_ctx_, data, len,
                                                this->tx_buffer_, &out_len);
     if (rc != BLUETTI_FFI_OK || out_len == 0) {
-        ESP_LOGW(TAG, "Failed to encrypt MODBUS command (rc=%d)", rc);
+        ESP_LOGW(TAG, "Failed to encrypt MODBUS command (rc=%" PRId32 ")", rc);
         return false;
     }
 

@@ -3,7 +3,7 @@
 esphome:
   name: bluetti-el30v2
   friendly_name: Bluetti EL30V2
-  min_version: 2026.1.4
+  min_version: 2026.9.1
   name_add_mac_suffix: false
 
 interval:
@@ -37,11 +37,19 @@ esp32:
       loop_task_stack_size: 16384
 
 external_components:
-  - source: github://x3ccd4828/esphome-bluetti@main
+  - source: github://x3ccd4828/esphome-bluetti@fix/rust-esphome-build
+    components: [bluetti_rust]
     refresh: 0s
 
 logger:
-  level: DEBUG
+  # ESPHome 2026.4+ logs entity states at VERBOSE, including on UART.
+  level: VERBOSE
+  initial_level: DEBUG
+  logs:
+    sensor: VERBOSE
+    text_sensor: VERBOSE
+    binary_sensor: VERBOSE
+    switch: VERBOSE
 
 wifi:
   ssid: !secret wifi_ssid
@@ -50,6 +58,8 @@ wifi:
     ssid: "EL30V2 Fallback"
 
 api:
+  encryption:
+    key: !secret api_encryption_key
 
 web_server:
 
@@ -58,8 +68,8 @@ ota:
 
 esp32_ble_tracker:
   scan_parameters:
-    interval: 1100ms
-    window: 1100ms
+    interval: 320ms
+    window: 300ms
     active: true
     continuous: true
 
@@ -161,7 +171,7 @@ text_sensor:
       if (mins < 0) return std::string("--:--");
       int hours = mins / 60;
       int minutes = mins % 60;
-      char buf[6];
+      char buf[16];  // Allow hours beyond two digits, including the full int range.
       snprintf(buf, sizeof(buf), "%02d:%02d", hours, minutes);
       return std::string(buf);
     update_interval: 10s
