@@ -5,129 +5,159 @@
 #include <cstring>
 #include <esp_random.h>
 #include <mbedtls/aes.h>
+#include <mbedtls/ecdh.h>
+#include <mbedtls/ecdsa.h>
 #include <mbedtls/md5.h>
+#include <mbedtls/sha256.h>
 
-namespace esphome {
-namespace bluetti {
+namespace esphome::bluetti {
+namespace {
 
-static const char *const TAG = "bluetti_encryption";
+constexpr const char *TAG = "bluetti_encryption";
+constexpr size_t AES_BLOCK_SIZE = 16;
+constexpr size_t PUBKEY_LEN = 64;
+constexpr size_t PEER_PAYLOAD_SIZE = 128;
+constexpr uint8_t LOCAL_AES_KEY[16] = {0x45, 0x9F, 0xC5, 0x35, 0x80, 0x89,
+                                       0x41, 0xF1, 0x70, 0x91, 0xE0, 0x99,
+                                       0x3E, 0xE3, 0xE9, 0x3D};
+constexpr uint8_t PRIVATE_KEY_L1[32] = {
+    0x4F, 0x19, 0xA1, 0x6E, 0x3E, 0x87, 0xBD, 0xD9, 0xBD, 0x24, 0xD3,
+    0xE5, 0x49, 0x5B, 0x88, 0x04, 0x15, 0x11, 0x94, 0x3C, 0xBC, 0x8B,
+    0x96, 0x9A, 0xDE, 0x96, 0x41, 0xD0, 0xF5, 0x6A, 0xF3, 0x37};
+// The original K2 trust anchor in SEC1 form, without its DER wrapper.
+constexpr uint8_t PUBLIC_KEY_K2[65] = {
+    0x04, 0xA7, 0x3A, 0xBF, 0x5D, 0x22, 0x32, 0xC8, 0xC1, 0xC7, 0x2E,
+    0x68, 0x30, 0x43, 0x43, 0xC2, 0x72, 0x49, 0x5E, 0x3A, 0x8F, 0xD6,
+    0xF3, 0x0E, 0xA9, 0x6D, 0xE2, 0xF4, 0xB3, 0xCE, 0x60, 0xB2, 0x51,
+    0xEE, 0x21, 0xAC, 0x66, 0x7C, 0xF8, 0xA7, 0x1E, 0x18, 0xB4, 0x6B,
+    0x66, 0x4E, 0xAE, 0xFF, 0xE3, 0xC4, 0x89, 0xF2, 0x4F, 0x69, 0x5B,
+    0x64, 0x11, 0xDB, 0x7E, 0x22, 0xCC, 0xC8, 0x5A, 0x85, 0x94};
 
-static int esp_random_callback(void *ctx, unsigned char *output,
-                               size_t output_len) {
-    (void)ctx;
-    esp_fill_random(output, output_len);
+// Scope-bound cleanup covers every early error return.
+template <typename T, void (*Init)(T *), void (*Free)(T *)> class Context {
+  public:
+    Context() { Init(&value_); }
+    ~Context() { Free(&value_); }
+    Context(const Context &) = delete;
+    Context &operator=(const Context &) = delete;
+    operator T *() { return &value_; }
+
+  private:
+    T value_;
+};
+using Group =
+    Context<mbedtls_ecp_group, mbedtls_ecp_group_init, mbedtls_ecp_group_free>;
+using Point =
+    Context<mbedtls_ecp_point, mbedtls_ecp_point_init, mbedtls_ecp_point_free>;
+using Integer = Context<mbedtls_mpi, mbedtls_mpi_init, mbedtls_mpi_free>;
+using Aes = Context<mbedtls_aes_context, mbedtls_aes_init, mbedtls_aes_free>;
+
+bool crypto_ok(int result, const char *operation) {
+    if (result != 0)
+        ESP_LOGE(TAG, "%s failed (ret=%d)", operation, result);
+    return result == 0;
+}
+
+int random_bytes(void *, unsigned char *output, size_t len) {
+    esp_fill_random(output, len);
     return 0;
 }
 
-// ============================================================================
-// BluettiMessage Implementation
-// ============================================================================
-
-BluettiMessage::BluettiMessage(const uint8_t *buffer, size_t len)
-    : buffer_(buffer), len_(len), data_len_(0), body_len_(0) {
-    if (len < KEX_DATA_OFFSET + CHECKSUM_SIZE) {
-        return;
-    }
-
-    // Calculate lengths without checksum
-    body_len_ = len_ - CHECKSUM_SIZE;
-    if (body_len_ > KEX_DATA_OFFSET) {
-        data_len_ = body_len_ - KEX_DATA_OFFSET;
-    }
+bool load_curve(mbedtls_ecp_group *group) {
+    return crypto_ok(mbedtls_ecp_group_load(group, MBEDTLS_ECP_DP_SECP256R1),
+                     "P-256 curve");
 }
 
-bool BluettiMessage::is_pre_key_exchange() const {
-    return len_ >= 2 && buffer_[0] == KEX_MAGIC[0] &&
-           buffer_[1] == KEX_MAGIC[1];
+bool read_public_key(mbedtls_ecp_group *group, mbedtls_ecp_point *point,
+                     const uint8_t *raw_key) {
+    uint8_t encoded[65];
+    encoded[0] = 0x04;
+    std::memcpy(encoded + 1, raw_key, PUBKEY_LEN);
+    return crypto_ok(
+        mbedtls_ecp_point_read_binary(group, point, encoded, sizeof(encoded)),
+        "Public key");
 }
 
-MessageType BluettiMessage::message_type() const {
-    if (len_ <= KEX_TYPE_OFFSET) {
-        return static_cast<MessageType>(0);
-    }
-    return static_cast<MessageType>(buffer_[KEX_TYPE_OFFSET]);
+bool hash_public_key(const uint8_t *key, const uint8_t *iv, uint8_t *hash) {
+    uint8_t message[80];
+    std::memcpy(message, key, PUBKEY_LEN);
+    std::memcpy(message + PUBKEY_LEN, iv, AES_BLOCK_SIZE);
+    return crypto_ok(mbedtls_sha256(message, sizeof(message), hash, 0),
+                     "SHA-256");
 }
 
-const uint8_t *BluettiMessage::data() const {
-    if (len_ < KEX_DATA_OFFSET + CHECKSUM_SIZE) {
-        return nullptr;
-    }
-    return buffer_ + KEX_DATA_OFFSET;
+bool verify_peer_signature(mbedtls_ecp_group *group, const uint8_t *key,
+                           const uint8_t *signature, const uint8_t *iv) {
+    Point trusted_key;
+    Integer r, s;
+    uint8_t hash[32];
+    return crypto_ok(mbedtls_ecp_point_read_binary(group, trusted_key,
+                                                   PUBLIC_KEY_K2,
+                                                   sizeof(PUBLIC_KEY_K2)),
+                     "K2 public key") &&
+           hash_public_key(key, iv, hash) &&
+           crypto_ok(mbedtls_mpi_read_binary(r, signature, 32),
+                     "Signature r") &&
+           crypto_ok(mbedtls_mpi_read_binary(s, signature + 32, 32),
+                     "Signature s") &&
+           crypto_ok(mbedtls_ecdsa_verify(group, hash, sizeof(hash),
+                                          trusted_key, r, s),
+                     "Peer signature");
 }
 
-const uint8_t *BluettiMessage::body() const {
-    if (len_ < KEX_BODY_OFFSET + CHECKSUM_SIZE) {
-        return nullptr;
-    }
-    return buffer_ + KEX_BODY_OFFSET;
+size_t finish_kex_packet(uint8_t type, size_t payload_len, uint8_t *packet) {
+    packet[0] = packet[1] = 0x2A;
+    packet[2] = type;
+    packet[3] = static_cast<uint8_t>(payload_len);
+    uint16_t checksum = 0;
+    for (size_t i = 2; i < payload_len + 4; ++i)
+        checksum += packet[i];
+    packet[payload_len + 4] = static_cast<uint8_t>(checksum >> 8);
+    packet[payload_len + 5] = static_cast<uint8_t>(checksum);
+    return payload_len + 6;
 }
 
-bool BluettiMessage::verify_checksum() const {
-    if (len_ < KEX_DATA_OFFSET + CHECKSUM_SIZE) {
+bool crypt_cbc(int mode, const uint8_t *data, size_t len, const uint8_t *key,
+               unsigned key_bits, const uint8_t *iv, uint8_t *output) {
+    Aes context;
+    uint8_t iv_copy[AES_BLOCK_SIZE];
+    std::memcpy(iv_copy, iv, sizeof(iv_copy));
+    int result = mode == MBEDTLS_AES_ENCRYPT
+                     ? mbedtls_aes_setkey_enc(context, key, key_bits)
+                     : mbedtls_aes_setkey_dec(context, key, key_bits);
+    return crypto_ok(result, "AES key") &&
+           crypto_ok(
+               mbedtls_aes_crypt_cbc(context, mode, len, iv_copy, data, output),
+               "AES-CBC");
+}
+
+bool encrypt_frame(const uint8_t *data, size_t len, const uint8_t *key,
+                   unsigned key_bits, const uint8_t *iv, const uint8_t *iv_seed,
+                   uint8_t *output, size_t *output_len) {
+    const size_t header_len = iv_seed == nullptr ? 2 : 6;
+    if (data == nullptr || output == nullptr || output_len == nullptr ||
+        len == 0 || len > UINT16_MAX || *output_len < header_len)
         return false;
-    }
+    const size_t padded_len =
+        (len + AES_BLOCK_SIZE - 1) / AES_BLOCK_SIZE * AES_BLOCK_SIZE;
+    if (padded_len > *output_len - header_len)
+        return false;
 
-    // Calculate checksum of body (without the checksum itself)
-    uint16_t computed = BluettiEncryption::hexsum(body(), body_len_);
-
-    // Read stored checksum (last 2 bytes, big-endian)
-    uint16_t stored = (static_cast<uint16_t>(buffer_[len_ - 2]) << 8) |
-                      static_cast<uint16_t>(buffer_[len_ - 1]);
-
-    return computed == stored;
+    // Move first to support aliased input/output without a temporary packet.
+    std::memmove(output + header_len, data, len);
+    std::memset(output + header_len + len, 0, padded_len - len);
+    if (!crypt_cbc(MBEDTLS_AES_ENCRYPT, output + header_len, padded_len, key,
+                   key_bits, iv, output + header_len))
+        return false;
+    output[0] = static_cast<uint8_t>(len >> 8);
+    output[1] = static_cast<uint8_t>(len);
+    if (iv_seed != nullptr)
+        std::memcpy(output + 2, iv_seed, 4);
+    *output_len = header_len + padded_len;
+    return true;
 }
 
-// ============================================================================
-// Static Utility Functions
-// ============================================================================
-
-void BluettiEncryption::md5_hash_16(const uint8_t *input, size_t len,
-                                    uint8_t *output) {
-    mbedtls_md5_context ctx;
-    mbedtls_md5_init(&ctx);
-    mbedtls_md5_starts(&ctx);
-    mbedtls_md5_update(&ctx, input, len);
-
-    uint8_t full_hash[16];
-    mbedtls_md5_finish(&ctx, full_hash);
-    mbedtls_md5_free(&ctx);
-
-    // Copy first 16 bytes (MD5 produces 16 bytes anyway)
-    std::memcpy(output, full_hash, 16);
-}
-
-void BluettiEncryption::xor_16(const uint8_t *a, const uint8_t *b,
-                               uint8_t *output) {
-    for (size_t i = 0; i < 16; ++i) {
-        output[i] = a[i] ^ b[i];
-    }
-}
-
-void BluettiEncryption::zero_pad(const uint8_t *data, size_t len,
-                                 uint8_t *output, size_t *out_len) {
-    std::memcpy(output, data, len);
-
-    size_t padding = (AES_BLOCK_SIZE - (len % AES_BLOCK_SIZE)) % AES_BLOCK_SIZE;
-    for (size_t i = 0; i < padding; ++i) {
-        output[len + i] = 0;
-    }
-
-    *out_len = len + padding;
-}
-
-uint16_t BluettiEncryption::hexsum(const uint8_t *data, size_t len) {
-    uint32_t sum = 0;
-    for (size_t i = 0; i < len; ++i) {
-        sum += data[i];
-    }
-    return static_cast<uint16_t>(sum & 0xFFFF);
-}
-
-// ============================================================================
-// BluettiEncryption Implementation
-// ============================================================================
-
-BluettiEncryption::BluettiEncryption() { reset(); }
+} // namespace
 
 void BluettiEncryption::reset() {
     unsecure_aes_key_.fill(0);
@@ -136,649 +166,165 @@ void BluettiEncryption::reset() {
     peer_pubkey_.fill(0);
     my_privkey_.fill(0);
     my_pubkey_.fill(0);
-
-    unsecure_key_set_ = false;
-    unsecure_iv_set_ = false;
-    secure_aes_key_set_ = false;
-    peer_pubkey_set_ = false;
-    my_keypair_set_ = false;
+    unsecure_key_set_ = secure_aes_key_set_ = peer_pubkey_set_ =
+        my_keypair_set_ = false;
 }
 
 bool BluettiEncryption::precompute_ephemeral_keypair() {
-    if (my_keypair_set_) {
+    if (my_keypair_set_)
         return true;
-    }
-    return generate_ephemeral_keypair();
+    Group group;
+    Point public_key;
+    Integer private_key;
+    uint8_t encoded[65];
+    size_t encoded_len = sizeof(encoded);
+    if (!load_curve(group) ||
+        !crypto_ok(mbedtls_ecp_gen_keypair(group, private_key, public_key,
+                                           random_bytes, nullptr),
+                   "Key generation") ||
+        !crypto_ok(mbedtls_mpi_write_binary(private_key, my_privkey_.data(),
+                                            my_privkey_.size()),
+                   "Private key export") ||
+        !crypto_ok(mbedtls_ecp_point_write_binary(
+                       group, public_key, MBEDTLS_ECP_PF_UNCOMPRESSED,
+                       &encoded_len, encoded, sizeof(encoded)),
+                   "Public key export"))
+        return false;
+    std::memcpy(my_pubkey_.data(), encoded + 1, PUBKEY_LEN);
+    my_keypair_set_ = true;
+    return true;
 }
 
 bool BluettiEncryption::handle_challenge(const uint8_t *data, size_t len,
                                          uint8_t *response,
                                          size_t *response_len) {
-    if (len != CHALLENGE_LEN) {
-        ESP_LOGE(TAG, "Invalid challenge length: %u",
-                 static_cast<unsigned>(len));
+    if (data == nullptr || len != 4 || response == nullptr ||
+        response_len == nullptr || *response_len < 10)
         return false;
-    }
-
-    // Reverse the 4-byte seed
-    uint8_t reversed[CHALLENGE_LEN];
-    for (size_t i = 0; i < CHALLENGE_LEN; ++i) {
-        reversed[i] = data[CHALLENGE_LEN - 1 - i];
-    }
-
-    // Derive unsecure IV = MD5(reversed_seed)
-    md5_hash_16(reversed, CHALLENGE_LEN, unsecure_aes_iv_.data());
-    unsecure_iv_set_ = true;
-
-    // Derive unsecure key = IV XOR LOCAL_AES_KEY
-    xor_16(unsecure_aes_iv_.data(), LOCAL_AES_KEY.data(),
-           unsecure_aes_key_.data());
+    uint8_t reversed[4] = {data[3], data[2], data[1], data[0]};
+    if (!crypto_ok(
+            mbedtls_md5(reversed, sizeof(reversed), unsecure_aes_iv_.data()),
+            "MD5"))
+        return false;
+    for (size_t i = 0; i < sizeof(LOCAL_AES_KEY); ++i)
+        unsecure_aes_key_[i] = unsecure_aes_iv_[i] ^ LOCAL_AES_KEY[i];
     unsecure_key_set_ = true;
-
-    ESP_LOGI(TAG, "Challenge handled, unsecure keys derived");
-
-    // Build response: MAGIC + TYPE(0x02) + LEN(4) + IV[8..12] + CHECKSUM
-    if (*response_len < 10) {
-        return false;
-    }
-
-    response[0] = KEX_MAGIC[0];
-    response[1] = KEX_MAGIC[1];
-    response[2] = CHALLENGE_RESPONSE_TYPE;
-    response[3] = CHALLENGE_LEN;
-    std::memcpy(response + 4,
-                unsecure_aes_iv_.data() + CHALLENGE_IV_RESPONSE_START,
-                CHALLENGE_LEN);
-
-    // Calculate checksum of body (bytes 2-7)
-    uint16_t checksum = hexsum(response + 2, 6);
-    response[8] = (checksum >> 8) & 0xFF;
-    response[9] = checksum & 0xFF;
-
-    *response_len = 10;
-    return true;
-}
-
-bool BluettiEncryption::aes_encrypt(const uint8_t *data, size_t len,
-                                    const uint8_t *key, size_t key_len,
-                                    const uint8_t *iv, uint8_t *output,
-                                    size_t *output_len) {
-    if (key_len != 16 && key_len != 32) {
-        ESP_LOGE(TAG, "Invalid key length: %u", static_cast<unsigned>(key_len));
-        return false;
-    }
-
-    mbedtls_aes_context ctx;
-    mbedtls_aes_init(&ctx);
-
-    int ret;
-    if (key_len == 16) {
-        ret = mbedtls_aes_setkey_enc(&ctx, key, 128);
-    } else {
-        ret = mbedtls_aes_setkey_enc(&ctx, key, 256);
-    }
-
-    if (ret != 0) {
-        mbedtls_aes_free(&ctx);
-        return false;
-    }
-
-    // Prepare IV copy (mbedtls modifies it)
-    uint8_t iv_copy[16];
-    std::memcpy(iv_copy, iv, 16);
-
-    // Zero-pad the input
-    uint8_t padded[512];
-    size_t padded_len;
-    zero_pad(data, len, padded, &padded_len);
-
-    // Encrypt
-    ret = mbedtls_aes_crypt_cbc(&ctx, MBEDTLS_AES_ENCRYPT, padded_len, iv_copy,
-                                padded, output);
-    mbedtls_aes_free(&ctx);
-
-    if (ret != 0) {
-        return false;
-    }
-
-    *output_len = padded_len;
-    return true;
-}
-
-bool BluettiEncryption::aes_decrypt(const uint8_t *data, size_t len,
-                                    const uint8_t *key, size_t key_len,
-                                    const uint8_t *iv, uint8_t *output,
-                                    size_t *output_len) {
-    if (key_len != 16 && key_len != 32) {
-        ESP_LOGE(TAG, "Invalid key length: %u", static_cast<unsigned>(key_len));
-        return false;
-    }
-
-    if (len % AES_BLOCK_SIZE != 0) {
-        ESP_LOGE(TAG, "Data length not aligned to AES block size");
-        return false;
-    }
-
-    mbedtls_aes_context ctx;
-    mbedtls_aes_init(&ctx);
-
-    int ret;
-    if (key_len == 16) {
-        ret = mbedtls_aes_setkey_dec(&ctx, key, 128);
-    } else {
-        ret = mbedtls_aes_setkey_dec(&ctx, key, 256);
-    }
-
-    if (ret != 0) {
-        mbedtls_aes_free(&ctx);
-        return false;
-    }
-
-    // Prepare IV copy
-    uint8_t iv_copy[16];
-    std::memcpy(iv_copy, iv, 16);
-
-    // Decrypt
-    ret = mbedtls_aes_crypt_cbc(&ctx, MBEDTLS_AES_DECRYPT, len, iv_copy, data,
-                                output);
-    mbedtls_aes_free(&ctx);
-
-    if (ret != 0) {
-        return false;
-    }
-
-    *output_len = len;
-    return true;
-}
-
-// ============================================================================
-// Phase 3: ECDH/ECDSA Implementation
-// ============================================================================
-
-#include <mbedtls/ecdh.h>
-#include <mbedtls/ecdsa.h>
-#include <mbedtls/ecp.h>
-#include <mbedtls/sha256.h>
-
-bool BluettiEncryption::verify_peer_signature(const uint8_t *pubkey,
-                                              const uint8_t *signature) {
-    mbedtls_ecdsa_context ecdsa;
-    mbedtls_ecdsa_init(&ecdsa);
-
-    // Load the P-256 curve
-    mbedtls_ecp_group grp;
-    mbedtls_ecp_group_init(&grp);
-    int ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to load P-256 curve");
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
-    // Extract K2 public key from SubjectPublicKeyInfo bytes.
-    // mbedtls_ecp_point_read_binary expects SEC1 encoding with 0x04 prefix.
-    uint8_t k2_pubkey_full[SEC1_UNCOMPRESSED_PUBKEY_LEN];
-    k2_pubkey_full[0] = SEC1_UNCOMPRESSED_TAG;
-    memcpy(k2_pubkey_full + 1, PUBLIC_KEY_K2_BYTES.data() + 27, PUBKEY_LEN);
-
-    // Read the K2 public key
-    mbedtls_ecp_point k2_pubkey;
-    mbedtls_ecp_point_init(&k2_pubkey);
-    ret = mbedtls_ecp_point_read_binary(&grp, &k2_pubkey, k2_pubkey_full,
-                                        SEC1_UNCOMPRESSED_PUBKEY_LEN);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to read K2 public key");
-        mbedtls_ecp_point_free(&k2_pubkey);
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
-    // Verify that K2 public key is on the curve
-    ret = mbedtls_ecp_check_pubkey(&grp, &k2_pubkey);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "K2 public key not on curve");
-        mbedtls_ecp_point_free(&k2_pubkey);
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
-    // Create the data that was signed: peer_pubkey + unsecure_iv
-    uint8_t signed_data[80]; // 64 bytes pubkey + 16 bytes IV
-    memcpy(signed_data, pubkey, 64);
-    memcpy(signed_data + 64, unsecure_aes_iv_.data(), 16);
-
-    // Hash the signed data with SHA256
-    uint8_t hash[32];
-    mbedtls_sha256(signed_data, sizeof(signed_data), hash, 0);
-
-    // Read the signature (64 bytes: r and s components)
-    mbedtls_mpi r, s;
-    mbedtls_mpi_init(&r);
-    mbedtls_mpi_init(&s);
-
-    ret = mbedtls_mpi_read_binary(&r, signature, 32);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to read signature r component");
-        mbedtls_mpi_free(&s);
-        mbedtls_mpi_free(&r);
-        mbedtls_ecp_point_free(&k2_pubkey);
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
-    ret = mbedtls_mpi_read_binary(&s, signature + 32, 32);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to read signature s component");
-        mbedtls_mpi_free(&s);
-        mbedtls_mpi_free(&r);
-        mbedtls_ecp_point_free(&k2_pubkey);
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
-    // Verify the ECDSA signature
-    ret = mbedtls_ecdsa_verify(&grp, hash, sizeof(hash), &k2_pubkey, &r, &s);
-
-    mbedtls_mpi_free(&s);
-    mbedtls_mpi_free(&r);
-    mbedtls_ecp_point_free(&k2_pubkey);
-    mbedtls_ecp_group_free(&grp);
-
-    if (ret != 0) {
-        ESP_LOGE(TAG, "ECDSA signature verification failed");
-        return false;
-    }
-
-    ESP_LOGI(TAG, "Peer signature verified successfully");
-    return true;
-}
-
-bool BluettiEncryption::generate_ephemeral_keypair() {
-    mbedtls_ecp_group grp;
-    mbedtls_ecp_group_init(&grp);
-    int ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to load P-256 curve for key generation");
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
-    // Generate ephemeral keypair
-    mbedtls_ecp_point pubkey;
-    mbedtls_mpi privkey;
-    mbedtls_ecp_point_init(&pubkey);
-    mbedtls_mpi_init(&privkey);
-
-    ret = mbedtls_ecp_gen_keypair(&grp, &privkey, &pubkey, &esp_random_callback,
-                                  nullptr);
-
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to generate ephemeral keypair");
-        mbedtls_mpi_free(&privkey);
-        mbedtls_ecp_point_free(&pubkey);
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
-    // Export private key
-    ret = mbedtls_mpi_write_binary(&privkey, my_privkey_.data(), 32);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to export private key");
-        mbedtls_mpi_free(&privkey);
-        mbedtls_ecp_point_free(&pubkey);
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
-    // Export public key (compressed format without 0x04 prefix, just X and Y
-    // coordinates)
-    uint8_t pubkey_full[65];
-    size_t pubkey_len = sizeof(pubkey_full);
-    ret = mbedtls_ecp_point_write_binary(
-        &grp, &pubkey, MBEDTLS_ECP_PF_UNCOMPRESSED, &pubkey_len, pubkey_full,
-        sizeof(pubkey_full));
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to export public key");
-        mbedtls_mpi_free(&privkey);
-        mbedtls_ecp_point_free(&pubkey);
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
-    // Copy without the 0x04 prefix
-    memcpy(my_pubkey_.data(), pubkey_full + 1, 64);
-    my_keypair_set_ = true;
-
-    mbedtls_mpi_free(&privkey);
-    mbedtls_ecp_point_free(&pubkey);
-    mbedtls_ecp_group_free(&grp);
-
-    ESP_LOGI(TAG, "Ephemeral keypair generated");
-    return true;
-}
-
-bool BluettiEncryption::derive_secure_key() {
-    if (!my_keypair_set_ || !peer_pubkey_set_) {
-        ESP_LOGE(TAG,
-                 "Cannot derive secure key: missing keypair or peer pubkey");
-        return false;
-    }
-
-    mbedtls_ecp_group grp;
-    mbedtls_ecp_group_init(&grp);
-    int ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to load P-256 curve for ECDH");
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
-    // Load our private key
-    mbedtls_mpi privkey;
-    mbedtls_mpi_init(&privkey);
-    ret = mbedtls_mpi_read_binary(&privkey, my_privkey_.data(), 32);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to read private key");
-        mbedtls_mpi_free(&privkey);
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
-    // Load peer public key
-    mbedtls_ecp_point peer_pubkey;
-    mbedtls_ecp_point_init(&peer_pubkey);
-    uint8_t peer_pubkey_full[65];
-    peer_pubkey_full[0] = 0x04; // Uncompressed point prefix
-    memcpy(peer_pubkey_full + 1, peer_pubkey_.data(), 64);
-
-    ret =
-        mbedtls_ecp_point_read_binary(&grp, &peer_pubkey, peer_pubkey_full, 65);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to read peer public key");
-        mbedtls_ecp_point_free(&peer_pubkey);
-        mbedtls_mpi_free(&privkey);
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
-    // Perform ECDH: shared_secret = privkey * peer_pubkey
-    mbedtls_ecp_point shared_secret;
-    mbedtls_ecp_point_init(&shared_secret);
-    ret = mbedtls_ecp_mul(&grp, &shared_secret, &privkey, &peer_pubkey,
-                          &esp_random_callback, nullptr);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "ECDH multiplication failed (ret=%d)", ret);
-        mbedtls_ecp_point_free(&shared_secret);
-        mbedtls_ecp_point_free(&peer_pubkey);
-        mbedtls_mpi_free(&privkey);
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
-    // Export shared secret point to binary (65 bytes: 0x04 + X + Y)
-    uint8_t shared_point[65];
-    size_t shared_len = sizeof(shared_point);
-    ret = mbedtls_ecp_point_write_binary(
-        &grp, &shared_secret, MBEDTLS_ECP_PF_UNCOMPRESSED, &shared_len,
-        shared_point, sizeof(shared_point));
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to export shared secret point");
-        mbedtls_ecp_point_free(&shared_secret);
-        mbedtls_ecp_point_free(&peer_pubkey);
-        mbedtls_mpi_free(&privkey);
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
-    // Extract X coordinate (bytes 1-32 after the 0x04 prefix)
-    memcpy(secure_aes_key_.data(), shared_point + 1, 32);
-    secure_aes_key_set_ = true;
-
-    mbedtls_ecp_point_free(&shared_secret);
-    mbedtls_ecp_point_free(&peer_pubkey);
-    mbedtls_mpi_free(&privkey);
-    mbedtls_ecp_group_free(&grp);
-
-    ESP_LOGI(TAG, "Secure AES key derived via ECDH");
+    std::memcpy(response + 4, unsecure_aes_iv_.data() + 8, 4);
+    *response_len = finish_kex_packet(0x02, 4, response);
     return true;
 }
 
 bool BluettiEncryption::handle_peer_pubkey(const uint8_t *data, size_t len,
                                            uint8_t *response,
                                            size_t *response_len) {
-    if (len != PEER_PUBKEY_PAYLOAD_LEN) {
-        ESP_LOGE(TAG, "Invalid peer pubkey payload length: %u", len);
+    if (!unsecure_key_set_ || data == nullptr || len != PEER_PAYLOAD_SIZE ||
+        response == nullptr || response_len == nullptr ||
+        *response_len < PEER_PAYLOAD_SIZE + 6)
         return false;
-    }
-
-    const uint8_t *pubkey = data;
-    const uint8_t *signature = data + PUBKEY_LEN;
-
-    // Verify peer signature
-    if (!verify_peer_signature(pubkey, signature)) {
-        return false;
-    }
-
-    // Store peer public key
-    memcpy(peer_pubkey_.data(), pubkey, PUBKEY_LEN);
-    peer_pubkey_set_ = true;
-
-    ESP_LOGI(TAG, "Peer public key stored");
-
-    // Ensure we have a local ephemeral keypair ready.
-    if (!precompute_ephemeral_keypair()) {
-        return false;
-    }
-
-    // Sign our public key with L1 private key
-    mbedtls_ecp_group grp;
-    mbedtls_ecp_group_init(&grp);
-    int ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to load curve for signing");
-        return false;
-    }
-
-    // Load L1 private key
-    mbedtls_mpi l1_privkey;
-    mbedtls_mpi_init(&l1_privkey);
-    ret = mbedtls_mpi_read_binary(&l1_privkey, PRIVATE_KEY_L1.data(), 32);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to read L1 private key");
-        mbedtls_mpi_free(&l1_privkey);
-        mbedtls_ecp_group_free(&grp);
-        return false;
-    }
-
-    // Create data to sign: my_pubkey + unsecure_iv
-    uint8_t data_to_sign[80];
-    memcpy(data_to_sign, my_pubkey_.data(), 64);
-    memcpy(data_to_sign + 64, unsecure_aes_iv_.data(), 16);
-
-    // Hash the data
+    Group group;
+    Integer private_key, r, s;
     uint8_t hash[32];
-    mbedtls_sha256(data_to_sign, sizeof(data_to_sign), hash, 0);
-
-    // Sign with ECDSA
-    mbedtls_mpi r, s;
-    mbedtls_mpi_init(&r);
-    mbedtls_mpi_init(&s);
-
-    ret = mbedtls_ecdsa_sign(&grp, &r, &s, &l1_privkey, hash, sizeof(hash),
-                             &esp_random_callback, nullptr);
-
-    mbedtls_mpi_free(&l1_privkey);
-    mbedtls_ecp_group_free(&grp);
-
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to sign with L1 key");
-        mbedtls_mpi_free(&s);
-        mbedtls_mpi_free(&r);
+    if (!load_curve(group) ||
+        !verify_peer_signature(group, data, data + PUBKEY_LEN,
+                               unsecure_aes_iv_.data()) ||
+        !precompute_ephemeral_keypair() ||
+        !hash_public_key(my_pubkey_.data(), unsecure_aes_iv_.data(), hash) ||
+        !crypto_ok(mbedtls_mpi_read_binary(private_key, PRIVATE_KEY_L1,
+                                           sizeof(PRIVATE_KEY_L1)),
+                   "L1 private key") ||
+        !crypto_ok(mbedtls_ecdsa_sign(group, r, s, private_key, hash,
+                                      sizeof(hash), random_bytes, nullptr),
+                   "Local signature"))
         return false;
-    }
-
-    // Build the response payload: my_pubkey + signature
-    uint8_t payload[128]; // 64 bytes pubkey + 64 bytes signature
-    memcpy(payload, my_pubkey_.data(), 64);
-    mbedtls_mpi_write_binary(&r, payload + 64, 32);
-    mbedtls_mpi_write_binary(&s, payload + 96, 32);
-
-    mbedtls_mpi_free(&s);
-    mbedtls_mpi_free(&r);
-
-    // Build KEX packet
-    if (*response_len < 4 + sizeof(payload) + 2) {
-        ESP_LOGE(TAG, "Response buffer too small");
+    // Save before writing the response: its input may be inside that buffer.
+    std::memcpy(peer_pubkey_.data(), data, PUBKEY_LEN);
+    std::memcpy(response + 4, my_pubkey_.data(), PUBKEY_LEN);
+    if (!crypto_ok(mbedtls_mpi_write_binary(r, response + 4 + PUBKEY_LEN, 32),
+                   "Signature r export") ||
+        !crypto_ok(
+            mbedtls_mpi_write_binary(s, response + 4 + PUBKEY_LEN + 32, 32),
+            "Signature s export"))
         return false;
-    }
+    *response_len = finish_kex_packet(0x05, PEER_PAYLOAD_SIZE, response);
+    peer_pubkey_set_ = true;
+    return true;
+}
 
-    response[0] = KEX_MAGIC[0];
-    response[1] = KEX_MAGIC[1];
-    response[2] = LOCAL_PUBKEY_TYPE;
-    response[3] = sizeof(payload);
-    memcpy(response + 4, payload, sizeof(payload));
-
-    // Calculate and append checksum over TYPE + LEN + PAYLOAD.
-    uint16_t checksum = hexsum(response + 2, 2 + sizeof(payload));
-    response[4 + sizeof(payload)] = (checksum >> 8) & 0xFF;
-    response[4 + sizeof(payload) + 1] = checksum & 0xFF;
-
-    *response_len = 4 + sizeof(payload) + 2;
-
-    ESP_LOGI(TAG, "Local public key response built");
+bool BluettiEncryption::derive_secure_key() {
+    if (!my_keypair_set_ || !peer_pubkey_set_)
+        return false;
+    Group group;
+    Point peer_key;
+    Integer private_key, shared_secret;
+    if (!load_curve(group) ||
+        !read_public_key(group, peer_key, peer_pubkey_.data()) ||
+        !crypto_ok(mbedtls_mpi_read_binary(private_key, my_privkey_.data(),
+                                           my_privkey_.size()),
+                   "Private key") ||
+        !crypto_ok(mbedtls_ecdh_compute_shared(group, shared_secret, peer_key,
+                                               private_key, random_bytes,
+                                               nullptr),
+                   "ECDH") ||
+        !crypto_ok(mbedtls_mpi_write_binary(shared_secret,
+                                            secure_aes_key_.data(),
+                                            secure_aes_key_.size()),
+                   "Shared secret export"))
+        return false;
+    secure_aes_key_set_ = true;
     return true;
 }
 
 bool BluettiEncryption::handle_pubkey_accepted(const uint8_t *data,
                                                size_t len) {
-    if (len != 1 || data[0] != 0) {
-        ESP_LOGE(TAG, "Invalid pubkey accepted response");
-        return false;
-    }
-
-    // Derive secure key via ECDH
-    if (!derive_secure_key()) {
-        return false;
-    }
-
-    ESP_LOGI(TAG, "Encryption handshake complete - secure key established");
-    return true;
+    return data != nullptr && len == 1 && data[0] == 0 && derive_secure_key();
 }
 
 bool BluettiEncryption::encrypt_unsecure_kex(const uint8_t *data, size_t len,
                                              uint8_t *output,
                                              size_t *output_len) {
-    if (!unsecure_key_set_ || !unsecure_iv_set_) {
-        ESP_LOGE(TAG, "Cannot encrypt KEX response: unsecure key not ready");
-        return false;
-    }
-
-    uint8_t encrypted[512];
-    size_t encrypted_len = sizeof(encrypted);
-    if (!aes_encrypt(data, len, unsecure_aes_key_.data(), 16,
-                     unsecure_aes_iv_.data(), encrypted, &encrypted_len)) {
-        return false;
-    }
-
-    if (*output_len < encrypted_len + 2) {
-        ESP_LOGE(TAG, "Output buffer too small for encrypted KEX response");
-        return false;
-    }
-
-    output[0] = (len >> 8) & 0xFF;
-    output[1] = len & 0xFF;
-    memcpy(output + 2, encrypted, encrypted_len);
-    *output_len = encrypted_len + 2;
-    return true;
+    return unsecure_key_set_ &&
+           encrypt_frame(data, len, unsecure_aes_key_.data(), 128,
+                         unsecure_aes_iv_.data(), nullptr, output, output_len);
 }
 
 bool BluettiEncryption::encrypt_modbus_command(const uint8_t *data, size_t len,
                                                uint8_t *output,
                                                size_t *output_len) {
-    if (!secure_aes_key_set_) {
-        ESP_LOGE(TAG, "Cannot encrypt: secure key not established");
+    if (!is_ready_for_commands())
         return false;
-    }
-
-    // Generate random IV seed
-    uint8_t iv_seed[4];
-    esp_fill_random(iv_seed, 4);
-
-    // Derive IV from seed
-    uint8_t iv[16];
-    md5_hash_16(iv_seed, 4, iv);
-
-    // Encrypt the data
-    uint8_t encrypted[512];
-    size_t encrypted_len;
-    if (!aes_encrypt(data, len, secure_aes_key_.data(), 32, iv, encrypted,
-                     &encrypted_len)) {
-        return false;
-    }
-
-    // Build output: length_prefix(2) + iv_seed(4) + encrypted_data
-    if (*output_len < 2 + 4 + encrypted_len) {
-        ESP_LOGE(TAG, "Output buffer too small for encrypted command");
-        return false;
-    }
-
-    output[0] = (len >> 8) & 0xFF;
-    output[1] = len & 0xFF;
-    memcpy(output + 2, iv_seed, 4);
-    memcpy(output + 6, encrypted, encrypted_len);
-
-    *output_len = 2 + 4 + encrypted_len;
-    return true;
+    uint8_t iv_seed[4], iv[AES_BLOCK_SIZE];
+    esp_fill_random(iv_seed, sizeof(iv_seed));
+    return crypto_ok(mbedtls_md5(iv_seed, sizeof(iv_seed), iv), "MD5") &&
+           encrypt_frame(data, len, secure_aes_key_.data(), 256, iv, iv_seed,
+                         output, output_len);
 }
 
 bool BluettiEncryption::decrypt_response(const uint8_t *data, size_t len,
                                          uint8_t *output, size_t *output_len) {
-    if (len < 6) {
-        ESP_LOGE(TAG, "Response too short to decrypt");
+    const bool secure = is_ready_for_commands();
+    const size_t header_len = secure ? 6 : 2;
+    if ((!secure && !unsecure_key_set_) || data == nullptr ||
+        output == nullptr || output_len == nullptr || len <= header_len)
         return false;
-    }
-
-    // Parse length prefix
-    uint16_t data_len = (static_cast<uint16_t>(data[0]) << 8) | data[1];
-
-    uint8_t *decrypted;
-    size_t decrypted_len;
-
-    if (secure_aes_key_set_) {
-        // Use secure key
-        uint8_t iv[16];
-        md5_hash_16(data + 2, 4, iv);
-
-        decrypted = output;
-        decrypted_len = *output_len;
-
-        if (!aes_decrypt(data + 6, len - 6, secure_aes_key_.data(), 32, iv,
-                         decrypted, &decrypted_len)) {
+    const size_t plaintext_len = static_cast<size_t>(data[0]) << 8 | data[1];
+    const size_t encrypted_len = len - header_len;
+    if (encrypted_len % AES_BLOCK_SIZE != 0 || encrypted_len > *output_len ||
+        plaintext_len > encrypted_len)
+        return false;
+    uint8_t iv[AES_BLOCK_SIZE];
+    if (secure) {
+        if (!crypto_ok(mbedtls_md5(data + 2, 4, iv), "MD5"))
             return false;
-        }
-    } else if (unsecure_key_set_ && unsecure_iv_set_) {
-        // Use unsecure key (during handshake)
-        decrypted = output;
-        decrypted_len = *output_len;
-
-        if (!aes_decrypt(data + 2, len - 2, unsecure_aes_key_.data(), 16,
-                         unsecure_aes_iv_.data(), decrypted, &decrypted_len)) {
-            return false;
-        }
     } else {
-        ESP_LOGE(TAG, "Cannot decrypt: no keys available");
-        return false;
+        std::memcpy(iv, unsecure_aes_iv_.data(), sizeof(iv));
     }
-
-    // Trim zero padding using the plaintext length prefix.
-    if (decrypted_len < data_len) {
-        ESP_LOGW(TAG, "Decrypted data shorter than expected");
+    std::memmove(output, data + header_len, encrypted_len);
+    if (!crypt_cbc(MBEDTLS_AES_DECRYPT, output, encrypted_len,
+                   secure ? secure_aes_key_.data() : unsecure_aes_key_.data(),
+                   secure ? 256 : 128, iv, output))
         return false;
-    }
-
-    *output_len = data_len;
+    *output_len = plaintext_len;
     return true;
 }
 
-} // namespace bluetti
-} // namespace esphome
+} // namespace esphome::bluetti

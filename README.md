@@ -137,6 +137,21 @@ these builds detect compatibility regressions rather than guarantee support
 for every future release. Compilation does not verify the live BLE handshake
 or output controls, which require an ESP32 and a Bluetti device.
 
+Host regression tests exercise the signed handshake, protocol vectors, buffer
+bounds, telemetry, queued AC/DC commands, retries, and disconnect handling.
+With CMake, a C++17 compiler, and mbedTLS 3.x development headers installed:
+
+```bash
+cmake -S tests -B /tmp/bluetti-tests -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/bluetti-tests
+ctest --test-dir /tmp/bluetti-tests --output-on-failure
+```
+
+AddressSanitizer and UndefinedBehaviorSanitizer are enabled by default. The
+tests substitute a test signing key in a build-directory copy of the encryption
+source; firmware retains the original Bluetti trust anchor. BLE is simulated,
+so hardware testing remains necessary.
+
 
 ## 📊 Home Assistant Entities
 

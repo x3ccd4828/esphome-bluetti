@@ -1,52 +1,46 @@
 #pragma once
 
 #include "bluetti_encryption.h"
-
 #include "esphome/components/ble_client/ble_client.h"
 #include "esphome/core/component.h"
 
 #include <cmath>
 
-namespace esphome {
-namespace bluetti {
-
-// Forward declaration for helper struct
-struct OutputConfig;
+namespace esphome::bluetti {
 
 class Bluetti : public Component, public ble_client::BLEClientNode {
   public:
-    ~Bluetti();
-
     void setup() override;
     void dump_config() override;
     float get_setup_priority() const override { return setup_priority::DATA; }
-
     void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                              esp_ble_gattc_cb_param_t *param) override;
 
-    bool is_ready() const;
-    bool send_modbus_command(const uint8_t *data, size_t len);
+    bool is_ready() const { return crypto_ctx_.is_ready_for_commands(); }
     bool set_ac_output(bool enabled);
     bool set_dc_output(bool enabled);
-
-    float battery_soc() const { return this->battery_soc_; }
-    int time_remaining_minutes() const { return this->time_remaining_min_; }
-    float dc_output_power() const { return this->dc_output_power_w_; }
-    float ac_output_power() const { return this->ac_output_power_w_; }
-    float dc_input_power() const { return this->dc_input_power_w_; }
-    float ac_input_power() const { return this->ac_input_power_w_; }
-    float ac_input_voltage() const { return this->ac_input_voltage_v_; }
+    float battery_soc() const { return battery_soc_; }
+    int time_remaining_minutes() const { return time_remaining_min_; }
+    float dc_output_power() const { return dc_output_power_w_; }
+    float ac_output_power() const { return ac_output_power_w_; }
+    float dc_input_power() const { return dc_input_power_w_; }
+    float ac_input_power() const { return ac_input_power_w_; }
+    float ac_input_voltage() const { return ac_input_voltage_v_; }
     bool ac_output_enabled() const {
-        return this->ac_output_state_known_ && this->ac_output_enabled_;
+        return ac_output_.known && ac_output_.enabled;
     }
     bool dc_output_enabled() const {
-        return this->dc_output_state_known_ && this->dc_output_enabled_;
+        return dc_output_.known && dc_output_.enabled;
     }
 
   protected:
-    static constexpr size_t TX_BUFFER_SIZE = 512;
-    static constexpr uint8_t KEX_MAGIC_0 = 0x2A;
-    static constexpr uint8_t KEX_MAGIC_1 = 0x2A;
+    struct OutputState {
+        uint32_t last_toggle_ms{0};
+        bool known{false};
+        bool enabled{false};
+        bool pending{false};
+        bool pending_value{false};
+    };
 
     static constexpr uint16_t REG_BATTERY_SOC = 102;
     static constexpr uint16_t REG_TIME_REMAINING = 104;
@@ -57,11 +51,14 @@ class Bluetti : public Component, public ble_client::BLEClientNode {
     static constexpr uint16_t REG_AC_INPUT_VOLTAGE = 1314;
     static constexpr uint16_t REG_CTRL_AC_OUTPUT = 2011;
     static constexpr uint16_t REG_CTRL_DC_OUTPUT = 2012;
-
-    static constexpr size_t POLL_REGISTER_COUNT = 9;
+    static constexpr uint16_t POLL_REGISTERS[] = {
+        REG_BATTERY_SOC,      REG_TIME_REMAINING, REG_DC_OUTPUT_POWER,
+        REG_AC_OUTPUT_POWER,  REG_DC_INPUT_POWER, REG_AC_INPUT_POWER,
+        REG_AC_INPUT_VOLTAGE, REG_CTRL_AC_OUTPUT, REG_CTRL_DC_OUTPUT};
+    static constexpr size_t POLL_REGISTER_COUNT =
+        sizeof(POLL_REGISTERS) / sizeof(POLL_REGISTERS[0]);
     static constexpr uint32_t POLL_INTERVAL_MS = 1000;
-    static constexpr uint32_t AC_TOGGLE_DEBOUNCE_MS = 1000;
-    static constexpr uint32_t DC_TOGGLE_DEBOUNCE_MS = 1000;
+    static constexpr uint32_t TOGGLE_DEBOUNCE_MS = 1000;
 
     esp32_ble::ESPBTUUID service_uuid_{
         esp32_ble::ESPBTUUID::from_raw("0000ff00-0000-1000-8000-00805f9b34fb")};
@@ -73,24 +70,13 @@ class Bluetti : public Component, public ble_client::BLEClientNode {
     BluettiEncryption crypto_ctx_;
     uint16_t notify_handle_{0};
     uint16_t write_handle_{0};
-    uint8_t tx_buffer_[TX_BUFFER_SIZE];
-    uint8_t cmd_buffer_[8]{};
-    uint16_t poll_registers_[POLL_REGISTER_COUNT]{
-        REG_BATTERY_SOC,      REG_TIME_REMAINING, REG_DC_OUTPUT_POWER,
-        REG_AC_OUTPUT_POWER,  REG_DC_INPUT_POWER, REG_AC_INPUT_POWER,
-        REG_AC_INPUT_VOLTAGE, REG_CTRL_AC_OUTPUT, REG_CTRL_DC_OUTPUT};
+    uint8_t tx_buffer_[512];
+    uint8_t cached_pubkey_response_[BluettiEncryption::PUBKEY_RESPONSE_SIZE];
+    size_t cached_pubkey_response_len_{0};
     size_t poll_index_{0};
     uint16_t pending_register_{0};
     uint32_t pending_since_ms_{0};
-    uint32_t last_ac_toggle_request_ms_{0};
-    uint32_t last_dc_toggle_request_ms_{0};
-    bool pending_ac_toggle_{false};
-    bool pending_ac_toggle_value_{false};
-    bool pending_dc_toggle_{false};
-    bool pending_dc_toggle_value_{false};
-    bool awaiting_pubkey_accepted_{false};
-    size_t cached_pubkey_response_len_{0};
-    uint8_t cached_pubkey_response_[TX_BUFFER_SIZE]{};
+    OutputState ac_output_, dc_output_;
 
     float battery_soc_{NAN};
     int time_remaining_min_{-1};
@@ -99,47 +85,22 @@ class Bluetti : public Component, public ble_client::BLEClientNode {
     float dc_input_power_w_{NAN};
     float ac_input_power_w_{NAN};
     float ac_input_voltage_v_{NAN};
-    bool ac_output_enabled_{false};
-    bool ac_output_state_known_{false};
-    bool dc_output_enabled_{false};
-    bool dc_output_state_known_{false};
 
-    static uint16_t modbus_crc16(const uint8_t *data, size_t len);
-
+    void reset_connection();
+    void reset_pending_read();
     void subscribe_notifications();
     void process_notification(const uint8_t *data, size_t len);
-    void handle_kex_message(const uint8_t *data, size_t len);
-    void handle_encrypted_message(const uint8_t *data, size_t len);
-    void handle_encrypted_kex(size_t decrypted_len);
+    void handle_kex_message(const uint8_t *data, size_t len, bool encrypted);
     void poll_next_register();
-    bool build_read_register_command(uint16_t reg_addr, uint16_t quantity,
-                                     uint8_t *out, size_t *out_len) const;
-    bool build_write_register_command(uint16_t reg_addr, uint16_t value,
-                                      uint8_t *out, size_t *out_len) const;
-    bool build_modbus_command(uint8_t func_code, uint16_t reg_addr,
-                              uint16_t value, uint8_t *out,
-                              size_t *out_len) const;
-    void mark_metrics_unavailable();
-    void reset_poll_state();
     void handle_decrypted_response(const uint8_t *data, size_t len);
     void apply_register_value(uint16_t reg_addr, uint16_t value);
     bool ble_write(const uint8_t *data, size_t len);
-    bool set_output(const OutputConfig &cfg, bool enabled);
-    void process_pending_toggle(const char *name, uint16_t reg, bool value,
-                                bool &pending_flag);
+    bool send_modbus_command(uint8_t function, uint16_t reg, uint16_t value);
+    bool set_output(OutputState &state, bool enabled, uint16_t reg,
+                    const char *name);
+    bool write_output(OutputState &state, bool enabled, uint16_t reg,
+                      const char *name);
+    static uint16_t modbus_crc16(const uint8_t *data, size_t len);
 };
 
-// Helper struct for output configuration (AC/DC)
-struct OutputConfig {
-    const char *name;
-    uint16_t reg;
-    uint32_t debounce_ms;
-    uint32_t &last_toggle_ms;
-    bool &state_known;
-    bool &enabled;
-    bool &pending;
-    bool &pending_value;
-};
-
-} // namespace bluetti
-} // namespace esphome
+} // namespace esphome::bluetti
