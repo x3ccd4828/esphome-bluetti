@@ -42,7 +42,14 @@ external_components:
     refresh: 0s
 
 logger:
-  level: DEBUG
+  # ESPHome 2026.4+ logs entity states at VERBOSE, including on UART.
+  level: VERBOSE
+  initial_level: DEBUG
+  logs:
+    sensor: VERBOSE
+    text_sensor: VERBOSE
+    binary_sensor: VERBOSE
+    switch: VERBOSE
 
 wifi:
   ssid: !secret wifi_ssid

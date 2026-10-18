@@ -84,6 +84,14 @@ the current `@main` source still contains the older build integration.
 `DC Always On` is enabled by default. Set the `dc_always_on` global's
 `initial_value` to `"false"` to prevent automatic DC output activation.
 
+The logger keeps general runtime messages at `DEBUG`, and enables `VERBOSE`
+only for the `sensor`, `text_sensor`, `binary_sensor`, and `switch` tags so
+readings and state changes appear on UART. ESPHome 2026.4 moved these state
+messages from `DEBUG` to `VERBOSE`. The global `level: VERBOSE` compiles those
+messages into the firmware; `initial_level: DEBUG` and the per-tag overrides
+control which ones are printed. Change your own YAML and reflash to apply this
+logger setup; downloading the external component alone does not change it.
+
 ### 2. Compile and update over Wi-Fi
 
 ```bash
