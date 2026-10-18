@@ -37,7 +37,7 @@ esp32:
       loop_task_stack_size: 16384
 
 external_components:
-  - source: github://x3ccd4828/esphome-bluetti@fix/rust-esphome-build
+  - source: github://x3ccd4828/esphome-bluetti@main
     components: [bluetti_rust]
     refresh: 0s
 

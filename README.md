@@ -71,15 +71,15 @@ GitHub:
 
 ```yaml
 external_components:
-  - source: github://x3ccd4828/esphome-bluetti@fix/rust-esphome-build
+  - source: github://x3ccd4828/esphome-bluetti@main
     components: [bluetti_rust]
     refresh: 0s
 ```
 
 On another machine, you only need `bluetti-el30v2.yaml`, your own `secrets.yaml`,
 ESPHome, and internet access. No local `components/` directory, repository clone,
-or Rust toolchain is needed. Use this branch until the fix is merged into `main`;
-the current `@main` source still contains the older build integration.
+or Rust toolchain is needed. The `@main` source includes the native ESP-IDF build
+integration for the bundled Rust library.
 
 `DC Always On` is enabled by default. Set the `dc_always_on` global's
 `initial_value` to `"false"` to prevent automatic DC output activation.
