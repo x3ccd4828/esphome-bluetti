@@ -1,12 +1,12 @@
-# Bluetti EL30V2 ESPHome Integration (Rust)
+# Bluetti EL30V2 ESPHome Integration (C++)
 
-Complete implementation of Bluetti BLE encryption protocol for ESPHome using a Rust static library.
+Complete implementation of Bluetti BLE encryption protocol for ESPHome using native C++ and ESP-IDF mbedTLS.
 This project enables full monitoring and control of Bluetti EL30V2 (and compatible) devices via Home Assistant.
 
 ## 🚀 Features
 
 - **Secure BLE Handshake**: Full implementation of Bluetti's challenge-response + ECDH key exchange.
-- **Rust Core**: Crypto logic runs in a high-performance, memory-safe Rust static library (`no_std`).
+- **Native C++ Core**: Crypto logic uses the mbedTLS library supplied by ESP-IDF.
 - **Full Telemetry**:
   - Battery %
   - AC/DC Output Power
@@ -23,23 +23,18 @@ This project enables full monitoring and control of Bluetti EL30V2 (and compatib
 ```
 bluetti-el30v2.yaml (ESPHome Config)
     ↓
-components/bluetti_rust/ (C++ Wrapper Component)
+components/bluetti/ (native C++ ESPHome component)
     ↓
-bluetti-encryption/ (Rust Library)
-    ↓
-components/bluetti_rust/lib/libbluetti_encryption.a
-    ↓
-ESP-IDF component (CMake add_prebuilt_library)
+mbedTLS (ESP-IDF crypto primitives)
 ```
 
 ## 📦 Quick Start
 
 ### 1. Configure ESPHome
 
-Use ESPHome **2026.9.1 or newer**, a classic ESP32 board, and the ESP-IDF framework.
-The precompiled Rust library is included; ordinary firmware builds do not need
-Cargo or a Rust toolchain. Other ESP32 variants need their own Rust archive and
-are rejected during configuration validation.
+Use ESPHome **2026.9.1 or newer**, an ESP32 board with BLE, and the ESP-IDF
+framework. The component builds directly with ESPHome. The
+`bluetti` component uses C++ and has no Rust library or toolchain dependency.
 
 Edit `bluetti-el30v2.yaml` and update:
 
@@ -66,20 +61,25 @@ the key is private to your device and is not supplied by the GitHub component.
 This protects native API traffic between ESPHome and Home Assistant. The Bluetti
 Bluetooth encryption handshake is independent.
 
-The configuration downloads the component and its bundled Rust archive from
-GitHub:
+The configuration downloads the C++ component from GitHub:
 
 ```yaml
 external_components:
   - source: github://x3ccd4828/esphome-bluetti@main
-    components: [bluetti_rust]
+    components: [bluetti]
     refresh: 0s
 ```
 
+For configurations using the earlier C++ branch, change
+`components: [bluetti_rust]` to `components: [bluetti]` and the top-level
+`bluetti_rust:` key to `bluetti:`. Keep the component's existing `id` and
+`ble_client_id` values. The component files, C++ class, namespace, and log tag
+are now named `bluetti`.
+
 On another machine, you only need `bluetti-el30v2.yaml`, your own `secrets.yaml`,
 ESPHome, and internet access. No local `components/` directory, repository clone,
-or Rust toolchain is needed. The `@main` source includes the native ESP-IDF build
-integration for the bundled Rust library.
+or Rust toolchain is needed. The component builds directly against ESP-IDF's
+mbedTLS library.
 
 `DC Always On` is enabled by default. Set the `dc_always_on` global's
 `initial_value` to `"false"` to prevent automatic DC output activation.
@@ -120,13 +120,10 @@ podman run --rm -it --device=/dev/ttyUSB0 --group-add keep-groups \
   run bluetti-el30v2.yaml --device /dev/ttyUSB0
 ```
 
-After ESPHome downloads the GitHub source, the Rust archive is registered with
-`esp32.add_idf_component` from ESPHome's downloaded component cache. Its CMake
-file imports and links the archive using
-ESP-IDF's supported `add_prebuilt_library` API. It does not use a PlatformIO
-registry lookup, linker flags tied to generated paths, or scripts that patch
-ESPHome's generated build files. ESPHome's default native ESP-IDF toolchain is
-used; selecting the deprecated PlatformIO toolchain is unnecessary.
+The component enables mbedTLS through ESPHome's ESP-IDF helpers, including
+the MD5 primitive required by Bluetti's protocol. It builds with ESPHome's
+default native ESP-IDF toolchain without a static Rust archive or a script
+that patches generated build files.
 
 ### Compatibility checks
 
@@ -140,26 +137,21 @@ these builds detect compatibility regressions rather than guarantee support
 for every future release. Compilation does not verify the live BLE handshake
 or output controls, which require an ESP32 and a Bluetti device.
 
-### Rebuilding the Rust library
-
-Only needed when changing the Rust code. In a checkout of
-[`bluetti-encryption`](https://github.com/x3ccd4828/bluetti-encryption), with an
-ESP Rust toolchain supporting `xtensa-esp32-none-elf`, run:
+Host regression tests exercise the signed handshake, protocol vectors, buffer
+bounds, telemetry, queued AC/DC commands, retries, and disconnect handling.
+With CMake, a C++17 compiler, and mbedTLS 3.x development headers installed:
 
 ```bash
-cargo +esp rustc \
-  -Z build-std=core,alloc \
-  --release \
-  --features c_ffi \
-  --target xtensa-esp32-none-elf \
-  --lib \
-  --crate-type staticlib
+cmake -S tests -B /tmp/bluetti-tests -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/bluetti-tests
+ctest --test-dir /tmp/bluetti-tests --output-on-failure
 ```
 
-Replace `components/bluetti_rust/lib/libbluetti_encryption.a` in this project
-with `target/xtensa-esp32-none-elf/release/libbluetti_encryption.a` from that
-build. Commit and push the updated archive to the Git ref used by
-`external_components`, then recompile ESPHome.
+AddressSanitizer and UndefinedBehaviorSanitizer are enabled by default. The
+tests substitute a test signing key in a build-directory copy of the encryption
+source; firmware retains the original Bluetti trust anchor. BLE is simulated,
+so hardware testing remains necessary.
+
 
 ## 📊 Home Assistant Entities
 
@@ -170,7 +162,7 @@ build. Commit and push the updated archive to the Git ref used by
 - **AC Output Power**: Watts
 - **DC Input Power**: Watts
 - **AC Input Power**: Watts
-- **Time Remaining**: Minutes
+- **Time Remaining**: Estimated runtime in hours:minutes
 - **AC Input Voltage**: Volts
 - **Encryption State**: 3 = Ready, 0 = Not Ready
 
@@ -205,10 +197,10 @@ build. Commit and push the updated archive to the Git ref used by
 
 - **"Encryption not ready"**: Wait ~5-10s after boot for handshake.
 - **"MODBUS poll timeout"**: Check BLE signal strength (RSSI).
-- **"Could not find the package with 'bluetti_encryption' requirements"**: An older component is being loaded. Use the GitHub source above, or another published Git ref containing the ESP-IDF component integration.
-- **"Linker error"**: Confirm the Rust archive was built for `xtensa-esp32-none-elf` with `c_ffi`. Toolchain ABI changes may require rebuilding it.
+- **"Could not find the package with 'bluetti_encryption' requirements"**: An older Rust component is being loaded. Use the GitHub source above to select the C++ implementation.
+- **"Linker/crypto build error"**: Confirm you use ESPHome 2026.9.1 or newer with ESP-IDF, then clean and rebuild.
 
 ## 📝 License
 
-This project combines ESPHome (GPL) and custom Rust components.
+This project combines ESPHome (GPL) and custom C++ components.
 Based on reverse-engineered protocol details. Use at your own risk.

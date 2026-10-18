@@ -11,6 +11,20 @@ permissions:
   contents: read
 
 jobs:
+  protocol-tests:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/esphome/esphome:2026.9.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host test dependencies
+        run: apt-get update -qq && apt-get install -y -qq cmake g++ libmbedtls-dev
+      - name: Test encryption and BLE command handling with sanitizers
+        run: |
+          cmake -S tests -B /tmp/bluetti-tests -DCMAKE_BUILD_TYPE=Debug
+          cmake --build /tmp/bluetti-tests --parallel 2
+          ctest --test-dir /tmp/bluetti-tests --output-on-failure
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -53,7 +67,7 @@ jobs:
                       "url": f"https://github.com/{os.environ['COMPONENT_REPOSITORY']}.git",
                       "ref": os.environ["COMPONENT_REF"],
                   },
-                  "components": ["bluetti_rust"],
+                  "components": ["bluetti"],
                   "refresh": "0s",
               }]
           }
