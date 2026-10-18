@@ -1,4 +1,4 @@
-# EL30V2 using Rust encryption static library
+# EL30V2 using native C++ encryption with ESP-IDF mbedTLS
 
 esphome:
   name: bluetti-el30v2
@@ -35,8 +35,6 @@ esp32:
     type: esp-idf
     advanced:
       loop_task_stack_size: 16384
-    sdkconfig_options:
-      CONFIG_MBEDTLS_MD5_C: y
 
 external_components:
   - source: github://x3ccd4828/esphome-bluetti@main

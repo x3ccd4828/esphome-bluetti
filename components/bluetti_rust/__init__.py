@@ -28,8 +28,6 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await ble_client.register_ble_node(var, config)
-    
-    # Add custom build script to link mbedtls properly
-    import pathlib
-    script_path = pathlib.Path(__file__).parent / "link_mbedtls.py"
-    cg.add_platformio_option("extra_scripts", ["pre:" + str(script_path)])
+
+    esp32.include_builtin_idf_component("mbedtls")
+    esp32.add_idf_sdkconfig_option("CONFIG_MBEDTLS_MD5_C", True)

@@ -1,5 +1,11 @@
 # Bluetti Encryption C++ Conversion Plan
 
+This is the original migration plan, retained for reference. The C++ port is
+implemented on `switch-to-cpp-encryption`, and the Rust archive, FFI wrapper,
+and linker scripts have been removed. ESPHome's native ESP-IDF helpers enable
+mbedTLS. Firmware compilation is checked in CI; the live BLE handshake and
+output controls still require verification on hardware.
+
 ## Overview
 Convert the Rust encryption library (`bluetti-encryption`) to pure C++ code to eliminate the Rust static library dependency and simplify the build process.
 

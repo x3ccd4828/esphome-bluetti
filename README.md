@@ -142,7 +142,7 @@ or output controls, which require an ESP32 and a Bluetti device.
 - **AC Output Power**: Watts
 - **DC Input Power**: Watts
 - **AC Input Power**: Watts
-- **Time Remaining**: Minutes
+- **Time Remaining**: Estimated runtime in hours:minutes
 - **AC Input Voltage**: Volts
 - **Encryption State**: 3 = Ready, 0 = Not Ready
 
