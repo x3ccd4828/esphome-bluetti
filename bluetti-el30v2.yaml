@@ -51,6 +51,8 @@ wifi:
     ssid: "EL30V2 Fallback"
 
 api:
+  encryption:
+    key: !secret api_encryption_key
 
 web_server:
 

@@ -35,7 +35,9 @@ jobs:
           COMPONENT_REF: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           python3 - <<'PY'
+          import base64
           import os
+          import secrets
           from pathlib import Path
           import yaml
 
@@ -59,7 +61,11 @@ jobs:
           target = Path("/tmp/esphome-compat")
           target.mkdir()
           (target / "bluetti-el30v2.yaml").write_text(config)
-          (target / "secrets.yaml").write_text('wifi_ssid: "build-test"\nwifi_password: "build-test-password"\n')
+          (target / "secrets.yaml").write_text(yaml.safe_dump({
+              "wifi_ssid": "build-test",
+              "wifi_password": "build-test-password",
+              "api_encryption_key": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+          }))
           PY
       - name: Compile using only the standalone YAML and GitHub source
         run: esphome compile /tmp/esphome-compat/bluetti-el30v2.yaml

@@ -46,6 +46,26 @@ Edit `bluetti-el30v2.yaml` and update:
 - **WiFi SSID/Password**: `!secret wifi_ssid` / `!secret wifi_password`
 - **MAC Address**: Under `ble_client` -> `mac_address`
 
+Native API encryption is enabled with `!secret api_encryption_key`. Generate a
+unique 32-byte base64 key with:
+
+```bash
+openssl rand -base64 32
+```
+
+Add the result to your untracked `secrets.yaml`:
+
+```yaml
+api_encryption_key: "PASTE_GENERATED_KEY_HERE"
+```
+
+After uploading the firmware, enter that same key when Home Assistant asks for
+the ESPHome device's encryption key. When building on another machine, copy
+the existing key rather than generating a new one. Keep it in `secrets.yaml`;
+the key is private to your device and is not supplied by the GitHub component.
+This protects native API traffic between ESPHome and Home Assistant. The Bluetti
+Bluetooth encryption handshake is independent.
+
 The configuration downloads the component and its bundled Rust archive from
 GitHub:
 
