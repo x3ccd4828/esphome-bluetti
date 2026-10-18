@@ -1,0 +1,39 @@
+name: ESPHome compatibility
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - esphome: "2026.9.1"
+            experimental: false
+          - esphome: latest
+            experimental: false
+          - esphome: dev
+            experimental: true
+    continue-on-error: ${{ matrix.experimental }}
+    container:
+      image: ghcr.io/esphome/esphome:${{ matrix.esphome }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Provide build-only Wi-Fi credentials
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          Path("secrets.yaml").write_text('wifi_ssid: "build-test"\nwifi_password: "build-test-password"\n')
+          PY
+      - name: Compile the Rust integration
+        run: esphome compile bluetti-el30v2.yaml

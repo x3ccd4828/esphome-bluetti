@@ -1,9 +1,12 @@
+from pathlib import Path
+
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import ble_client
+from esphome.components import ble_client, esp32
 from esphome.const import CONF_ID
 
 DEPENDENCIES = ["ble_client"]
+DOMAIN = "bluetti_rust"
 
 bluetti_rust_ns = cg.esphome_ns.namespace("bluetti_rust")
 BluettiRust = bluetti_rust_ns.class_(
@@ -20,18 +23,24 @@ CONFIG_SCHEMA = (
     .extend(cv.COMPONENT_SCHEMA)
 )
 
+FINAL_VALIDATE_SCHEMA = cv.All(
+    cv.only_with_framework("esp-idf"),
+    esp32.only_on_variant(
+        supported=["ESP32"], msg_prefix="The bundled Bluetti Rust library"
+    ),
+)
+
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await ble_client.register_ble_node(var, config)
 
-    # Link the pre-compiled Rust static library
-    # Get the directory of this __init__.py file to find the library
-    import os
-    component_dir = os.path.dirname(os.path.realpath(__file__))
-    lib_dir = os.path.join(component_dir, "lib")
-    
-    cg.add_build_flag(f"-L{lib_dir}")
-    cg.add_build_flag("-lbluetti_encryption")
-    cg.add_library("bluetti_encryption", None)
+    # This is a bundled archive, not a PlatformIO registry dependency.
+    # Let ESP-IDF manage its linking through the component's CMakeLists.txt.
+    lib_dir = Path(__file__).resolve().parent / "lib"
+    if not (lib_dir / "libbluetti_encryption.a").is_file():
+        raise cv.Invalid(f"Bluetti Rust archive is missing from {lib_dir}")
+    esp32.add_idf_component(
+        name="bluetti_encryption", path=str(lib_dir / "bluetti_encryption")
+    )
