@@ -46,9 +46,20 @@ Edit `bluetti-el30v2.yaml` and update:
 - **WiFi SSID/Password**: `!secret wifi_ssid` / `!secret wifi_password`
 - **MAC Address**: Under `ble_client` -> `mac_address`
 
-The configuration uses `components/` from this checkout, so local fixes are
-included in builds. A GitHub external component source will build that remote
-ref instead; it will only include these changes after they are published there.
+The configuration downloads the component and its bundled Rust archive from
+GitHub:
+
+```yaml
+external_components:
+  - source: github://x3ccd4828/esphome-bluetti@fix/rust-esphome-build
+    components: [bluetti_rust]
+    refresh: 0s
+```
+
+On another machine, you only need `bluetti-el30v2.yaml`, your own `secrets.yaml`,
+ESPHome, and internet access. No local `components/` directory, repository clone,
+or Rust toolchain is needed. Use this branch until the fix is merged into `main`;
+the current `@main` source still contains the older build integration.
 
 `DC Always On` is enabled by default. Set the `dc_always_on` global's
 `initial_value` to `"false"` to prevent automatic DC output activation.
@@ -81,8 +92,9 @@ podman run --rm -it --device=/dev/ttyUSB0 --group-add keep-groups \
   run bluetti-el30v2.yaml --device /dev/ttyUSB0
 ```
 
-The Rust archive is registered as a local ESP-IDF component through
-`esp32.add_idf_component`. Its CMake file imports and links the archive using
+After ESPHome downloads the GitHub source, the Rust archive is registered with
+`esp32.add_idf_component` from ESPHome's downloaded component cache. Its CMake
+file imports and links the archive using
 ESP-IDF's supported `add_prebuilt_library` API. It does not use a PlatformIO
 registry lookup, linker flags tied to generated paths, or scripts that patch
 ESPHome's generated build files. ESPHome's default native ESP-IDF toolchain is
@@ -90,9 +102,12 @@ used; selecting the deprecated PlatformIO toolchain is unnecessary.
 
 ### Compatibility checks
 
-GitHub Actions compiles the full configuration on pushes, pull requests, and
-weekly against ESPHome `2026.9.1`, `latest`, and `dev`. Development-version
-failures are advisory. Future releases can still change APIs or toolchain ABI;
+GitHub Actions compiles the full configuration on pushes and pull requests
+against ESPHome `2026.9.1`, `latest`, and `dev`. A weekly schedule also runs once
+the workflow is on the repository's default branch. CI builds from a separate
+configuration directory containing only the YAML and test Wi-Fi credentials,
+and downloads the component from the exact GitHub commit being checked.
+Development-version failures are advisory. Future releases can still change APIs or toolchain ABI;
 these builds detect compatibility regressions rather than guarantee support
 for every future release. Compilation does not verify the live BLE handshake
 or output controls, which require an ESP32 and a Bluetti device.
@@ -115,7 +130,8 @@ cargo +esp rustc \
 
 Replace `components/bluetti_rust/lib/libbluetti_encryption.a` in this project
 with `target/xtensa-esp32-none-elf/release/libbluetti_encryption.a` from that
-build, then recompile ESPHome.
+build. Commit and push the updated archive to the Git ref used by
+`external_components`, then recompile ESPHome.
 
 ## 📊 Home Assistant Entities
 
@@ -161,7 +177,7 @@ build, then recompile ESPHome.
 
 - **"Encryption not ready"**: Wait ~5-10s after boot for handshake.
 - **"MODBUS poll timeout"**: Check BLE signal strength (RSSI).
-- **"Could not find the package with 'bluetti_encryption' requirements"**: An older component is being loaded. Use this checkout's local component source, or a published Git ref containing the ESP-IDF component integration.
+- **"Could not find the package with 'bluetti_encryption' requirements"**: An older component is being loaded. Use the GitHub source above, or another published Git ref containing the ESP-IDF component integration.
 - **"Linker error"**: Confirm the Rust archive was built for `xtensa-esp32-none-elf` with `c_ffi`. Toolchain ABI changes may require rebuilding it.
 
 ## 📝 License

@@ -29,11 +29,37 @@ jobs:
       image: ghcr.io/esphome/esphome:${{ matrix.esphome }}
     steps:
       - uses: actions/checkout@v4
-      - name: Provide build-only Wi-Fi credentials
+      - name: Prepare a standalone configuration using the GitHub component
+        env:
+          COMPONENT_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          COMPONENT_REF: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           python3 - <<'PY'
+          import os
           from pathlib import Path
-          Path("secrets.yaml").write_text('wifi_ssid: "build-test"\nwifi_password: "build-test-password"\n')
+          import yaml
+
+          # Keep the YAML's !secret tags, and use the commit under test instead
+          # of the example branch, including for pull requests from forks.
+          config = Path("bluetti-el30v2.yaml").read_text()
+          start = config.index("external_components:\n")
+          end = config.index("\nlogger:\n", start)
+          source = {
+              "external_components": [{
+                  "source": {
+                      "type": "git",
+                      "url": f"https://github.com/{os.environ['COMPONENT_REPOSITORY']}.git",
+                      "ref": os.environ["COMPONENT_REF"],
+                  },
+                  "components": ["bluetti_rust"],
+                  "refresh": "0s",
+              }]
+          }
+          config = config[:start] + yaml.safe_dump(source, sort_keys=False) + config[end:]
+          target = Path("/tmp/esphome-compat")
+          target.mkdir()
+          (target / "bluetti-el30v2.yaml").write_text(config)
+          (target / "secrets.yaml").write_text('wifi_ssid: "build-test"\nwifi_password: "build-test-password"\n')
           PY
-      - name: Compile the Rust integration
-        run: esphome compile bluetti-el30v2.yaml
+      - name: Compile using only the standalone YAML and GitHub source
+        run: esphome compile /tmp/esphome-compat/bluetti-el30v2.yaml
