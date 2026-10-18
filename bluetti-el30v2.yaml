@@ -162,7 +162,7 @@ text_sensor:
       if (mins < 0) return std::string("--:--");
       int hours = mins / 60;
       int minutes = mins % 60;
-      char buf[6];
+      char buf[16];  // Allow hours beyond two digits, including the full int range.
       snprintf(buf, sizeof(buf), "%02d:%02d", hours, minutes);
       return std::string(buf);
     update_interval: 10s
