@@ -1,0 +1,268 @@
+# EL30V2 on Raspberry Pi Pico W using BTstack and bundled BearSSL
+
+esphome:
+  name: bluetti-el30v2-picow
+  friendly_name: Bluetti EL30V2 Pico W
+  min_version: 2026.9.1
+  name_add_mac_suffix: false
+
+interval:
+  - interval: 15s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(ac_always_on) && id(bluetti_handler)->is_ready() &&
+                     id(bluetti_handler)->battery_soc() >= 3.0f &&
+                     !id(bluetti_handler)->ac_output_enabled();
+          then:
+            - lambda: |-
+                id(bluetti_handler)->set_ac_output(true);
+      - if:
+          condition:
+            lambda: |-
+              return id(dc_always_on) && id(bluetti_handler)->is_ready() &&
+                     id(bluetti_handler)->battery_soc() >= 3.0f &&
+                     !id(bluetti_handler)->dc_output_enabled();
+          then:
+            - lambda: |-
+                id(bluetti_handler)->set_dc_output(true);
+
+rp2:
+  board: rpipicow
+
+rp2040_ble:
+
+external_components:
+  - source: github://x3ccd4828/esphome-bluetti@feat/pico-w-backend
+    components: [bluetti]
+    refresh: 0s
+
+logger:
+  # ESPHome 2026.4+ logs entity states at VERBOSE, including on UART.
+  level: VERBOSE
+  initial_level: DEBUG
+  logs:
+    sensor: VERBOSE
+    text_sensor: VERBOSE
+    binary_sensor: VERBOSE
+    switch: VERBOSE
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "EL30V2 Fallback"
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+web_server:
+
+ota:
+  - platform: esphome
+
+bluetti:
+  id: bluetti_handler
+  mac_address: "A8:46:74:31:18:12"
+  address_type: public
+
+globals:
+  - id: ac_always_on
+    type: bool
+    restore_value: yes
+    initial_value: "false"
+
+  - id: dc_always_on
+    type: bool
+    restore_value: no
+    initial_value: "true"
+
+sensor:
+  - platform: template
+    name: "Encryption State"
+    lambda: |-
+      if (id(bluetti_handler)->is_ready()) {
+        return 3;
+      }
+      return 0;
+    update_interval: 5s
+
+  - platform: template
+    name: "Battery"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    device_class: battery
+    state_class: measurement
+    lambda: |-
+      return id(bluetti_handler)->battery_soc();
+    update_interval: 5s
+
+  - platform: template
+    name: "DC Output Power"
+    unit_of_measurement: "W"
+    accuracy_decimals: 0
+    device_class: power
+    state_class: measurement
+    lambda: |-
+      return id(bluetti_handler)->dc_output_power();
+    update_interval: 5s
+
+  - platform: template
+    name: "AC Output Power"
+    unit_of_measurement: "W"
+    accuracy_decimals: 0
+    device_class: power
+    state_class: measurement
+    lambda: |-
+      return id(bluetti_handler)->ac_output_power();
+    update_interval: 5s
+
+  - platform: template
+    name: "DC Input Power"
+    unit_of_measurement: "W"
+    accuracy_decimals: 0
+    device_class: power
+    state_class: measurement
+    lambda: |-
+      return id(bluetti_handler)->dc_input_power();
+    update_interval: 5s
+
+  - platform: template
+    name: "AC Input Power"
+    unit_of_measurement: "W"
+    accuracy_decimals: 0
+    device_class: power
+    state_class: measurement
+    lambda: |-
+      return id(bluetti_handler)->ac_input_power();
+    update_interval: 5s
+
+  - platform: template
+    name: "AC Input Voltage"
+    unit_of_measurement: "V"
+    accuracy_decimals: 1
+    device_class: voltage
+    state_class: measurement
+    lambda: |-
+      return id(bluetti_handler)->ac_input_voltage();
+    update_interval: 10s
+
+text_sensor:
+  - platform: template
+    name: "Time Remaining"
+    icon: mdi:timer-outline
+    lambda: |-
+      int mins = id(bluetti_handler)->time_remaining_minutes();
+      if (mins < 0) return std::string("--:--");
+      int hours = mins / 60;
+      int minutes = mins % 60;
+      char buf[16];  // Allow hours beyond two digits, including the full int range.
+      snprintf(buf, sizeof(buf), "%02d:%02d", hours, minutes);
+      return std::string(buf);
+    update_interval: 10s
+
+binary_sensor:
+  - platform: template
+    name: "BLE Connected"
+    lambda: |-
+      return id(bluetti_handler)->is_connected();
+
+switch:
+  - platform: template
+    name: "BLE Client"
+    entity_category: diagnostic
+    restore_mode: DISABLED
+    lambda: |-
+      return id(bluetti_handler)->is_enabled();
+    turn_on_action:
+      - lambda: |-
+          id(bluetti_handler)->set_enabled(true);
+    turn_off_action:
+      - lambda: |-
+          id(bluetti_handler)->set_enabled(false);
+
+  - platform: template
+    id: ac_always_on_mode
+    name: "AC Always On"
+    entity_category: config
+    restore_mode: DISABLED
+    lambda: |-
+      return id(ac_always_on);
+    turn_on_action:
+      - lambda: |-
+          id(ac_always_on) = true;
+          if (id(bluetti_handler)->battery_soc() >= 3.0f) {
+            id(bluetti_handler)->set_ac_output(true);
+          } else {
+            ESP_LOGW("main", "AC Always On enabled but battery < 3%%; skipping AC ON");
+          }
+    turn_off_action:
+      - lambda: |-
+          id(ac_always_on) = false;
+
+  - platform: template
+    id: ac_output_switch
+    name: "AC Output"
+    lambda: |-
+      return id(bluetti_handler)->ac_output_enabled();
+    turn_on_action:
+      - lambda: |-
+          id(bluetti_handler)->set_ac_output(true);
+    turn_off_action:
+      - if:
+          condition:
+            lambda: |-
+              return id(ac_always_on);
+          then:
+            - logger.log:
+                level: WARN
+                format: "AC Always On is enabled; ignoring OFF request"
+            - lambda: |-
+                id(ac_output_switch).publish_state(true);
+          else:
+            - lambda: |-
+                id(bluetti_handler)->set_ac_output(false);
+
+  - platform: template
+    id: dc_always_on_mode
+    name: "DC Always On"
+    entity_category: config
+    restore_mode: DISABLED
+    lambda: |-
+      return id(dc_always_on);
+    turn_on_action:
+      - lambda: |-
+          id(dc_always_on) = true;
+          if (id(bluetti_handler)->battery_soc() >= 3.0f) {
+            id(bluetti_handler)->set_dc_output(true);
+          } else {
+            ESP_LOGW("main", "DC Always On enabled but battery < 3%%; skipping DC ON");
+          }
+    turn_off_action:
+      - lambda: |-
+          id(dc_always_on) = false;
+
+  - platform: template
+    id: dc_output_switch
+    name: "DC Output"
+    lambda: |-
+      return id(bluetti_handler)->dc_output_enabled();
+    turn_on_action:
+      - lambda: |-
+          id(bluetti_handler)->set_dc_output(true);
+    turn_off_action:
+      - if:
+          condition:
+            lambda: |-
+              return id(dc_always_on);
+          then:
+            - logger.log:
+                level: WARN
+                format: "DC Always On is enabled; ignoring OFF request"
+            - lambda: |-
+                id(dc_output_switch).publish_state(true);
+          else:
+            - lambda: |-
+                id(bluetti_handler)->set_dc_output(false);

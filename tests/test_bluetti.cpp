@@ -1,4 +1,5 @@
 #include "bluetti.h"
+#include "bluetti_crypto.h"
 #include "fixtures.h"
 
 #include <algorithm>
@@ -19,6 +20,7 @@ static std::mt19937 rng(42);
 static int64_t now_us = 1000000;
 static std::vector<Bytes> writes;
 static bool fail_write = false;
+static bool fail_random = false;
 
 void esp_fill_random(void *output, size_t len) {
     auto *bytes = static_cast<uint8_t *>(output);
@@ -29,7 +31,15 @@ static int random_bytes(void *, unsigned char *output, size_t len) {
     esp_fill_random(output, len);
     return 0;
 }
-int64_t esp_timer_get_time() { return now_us; }
+namespace esphome {
+uint32_t millis() { return now_us / 1000; }
+bool random_bytes(uint8_t *data, size_t len) {
+    if (fail_random)
+        return false;
+    esp_fill_random(data, len);
+    return true;
+}
+} // namespace esphome
 int esp_ble_gattc_register_for_notify(int, uint8_t *, uint16_t) { return 0; }
 int esp_ble_gattc_write_char_descr(int, uint16_t, uint16_t, uint16_t, uint8_t *,
                                    int, int) {
@@ -233,10 +243,23 @@ static void test_crypto() {
     assert(crypto.decrypt_response(response.data(), response.size(),
                                    buffer.data(), &size));
     assert(Bytes(buffer.begin(), buffer.begin() + size) == plain);
+    fail_random = true;
+    size = buffer.size();
+    assert(!crypto.encrypt_modbus_command(plain.data(), plain.size(),
+                                          buffer.data(), &size));
+    fail_random = false;
     crypto.reset();
     assert(!crypto.is_ready_for_commands());
     assert(!crypto.decrypt_response(response.data(), response.size(),
                                     buffer.data(), &size));
+    fail_random = true;
+    assert(!crypto.precompute_ephemeral_keypair());
+    fail_random = false;
+    // Reject an off-curve peer point on both crypto implementations.
+    uint8_t invalid_point[64]{}, private_key[32]{}, secret[32]{};
+    private_key[31] = 2;
+    assert(!esphome::bluetti::crypto::shared_secret(private_key, invalid_point,
+                                                    secret));
 }
 
 static Bytes with_crc(Bytes bytes) {
@@ -260,6 +283,7 @@ class TestBluetti : public esphome::bluetti::Bluetti {
     }
 };
 
+#ifndef USE_RP2
 static void test_controller() {
     TestBluetti device;
     esphome::ble_client::BLEClient ble;
@@ -322,6 +346,121 @@ static void test_controller() {
     assert(!device.is_ready() && std::isnan(device.battery_soc()));
     assert(!device.ac_output_enabled() && !device.dc_output_enabled());
 }
+#else
+static void test_controller() {
+    TestBluetti device;
+    esphome::bluetooth_connection::RP2GattClient ble;
+    ble.listener = &device;
+    device.set_backend(&ble);
+    device.set_mac_address(0xa84674311812ULL);
+    device.set_address_type(0);
+    device.setup();
+    now_us = 6000000;
+    device.loop();
+    assert(ble.connects == 1 && ble.address == 0xa84674311812ULL);
+    assert(ble.address_type == 0 && !device.is_connected());
+    device.on_connection_state(true, 256, 0);
+    assert(ble.discoveries == 1);
+    device.on_service_discovery_done(0);
+    assert(ble.services_released && ble.descriptor_handle == 14);
+
+    // Bluetti can notify before the CCCD write's completion. The challenge
+    // response must remain queued until BTstack can accept another write.
+    auto challenge = hex("2a2a010401020304000f");
+    device.on_notify_data(10, challenge.data(), challenge.size());
+    assert(ble.writes.empty());
+    ble.complete(14);
+    assert(device.is_connected());
+    assert(ble.writes.back() == hex(fixtures::CHALLENGE_RESPONSE));
+
+    // The peer key arrives while the challenge response is still in flight.
+    auto peer =
+        frame(hex(fixtures::PEER_PACKET), hex(fixtures::UNSECURE_KEY), false);
+    device.on_notify_data(10, peer.data(), peer.size());
+    assert(ble.writes.size() == 1);
+    ble.complete();
+    auto cached = ble.writes.back();
+    auto shared =
+        check_local_key(unframe(cached, hex(fixtures::UNSECURE_KEY), false));
+    ble.complete();
+    device.on_notify_data(10, peer.data(), peer.size());
+    assert(ble.writes.back() == cached);
+    ble.complete();
+    auto accepted = hex(fixtures::ENCRYPTED_ACCEPTED);
+    device.on_notify_data(10, accepted.data(), accepted.size());
+    assert(device.is_ready());
+    device.poll_next_register();
+    assert(unframe(ble.writes.back(), shared, true) ==
+           with_crc(hex("010300660001")));
+    assert(device.set_ac_output(true) && device.set_dc_output(true));
+    // Telemetry may also precede the GATT write acknowledgement.
+    device.receive(frame(with_crc(hex("0103020064")), shared, true));
+    assert(device.battery_soc() == 100);
+    device.poll_next_register();
+    device.poll_next_register();
+    auto count = ble.writes.size();
+    ble.complete();
+    assert(ble.writes.size() == count + 1);
+    assert(unframe(ble.writes.back(), shared, true) ==
+           with_crc(hex("010607db0001")));
+    ble.complete();
+    assert(unframe(ble.writes.back(), shared, true) ==
+           with_crc(hex("010607dc0001")));
+    ble.complete();
+    device.receive(frame(with_crc(hex("010607db0001")), shared, true));
+    device.receive(frame(with_crc(hex("010607dc0001")), shared, true));
+    assert(device.ac_output_enabled() && device.dc_output_enabled());
+
+    // Synchronous busy rejection must keep the encrypted packet for retry.
+    ble.write_error = 1;
+    count = ble.writes.size();
+    device.poll_next_register();
+    assert(ble.writes.size() == count);
+    ble.write_error = 0;
+    device.loop();
+    assert(ble.writes.size() == count + 1);
+    // An asynchronous ATT failure tears down and clears stale state.
+    ble.complete(20, 5);
+    assert(ble.disconnects == 1 && !device.is_connected() &&
+           !device.is_ready());
+    device.on_connection_state(false, 0, 5);
+    assert(std::isnan(device.battery_soc()));
+    now_us += 6000000;
+    device.loop();
+    assert(ble.connects == 2);
+    device.set_enabled(false); // Cancel a connect still in progress.
+    assert(!device.is_enabled() && ble.disconnects == 2);
+    device.on_connection_state(false, 0, 0);
+    now_us += 6000000;
+    device.loop();
+    assert(ble.connects == 2);
+    device.set_enabled(true);
+    device.loop();
+    assert(ble.connects == 3);
+    device.on_connection_state(true, 256, 0);
+    // A device missing a real CCCD must fail instead of guessing a handle.
+    ble.descriptors[0].uuid.value = 0x2901;
+    device.on_service_discovery_done(0);
+    assert(ble.disconnects == 3);
+    device.on_connection_state(false, 0, 0);
+    now_us += 6000000;
+    device.loop();
+    now_us += 31000000;
+    device.loop(); // Missing connect/handshake completion times out.
+    assert(ble.disconnects == 4);
+    device.on_connection_state(false, 0, 0);
+    device.on_ota_global_state(esphome::ota::OTA_STARTED, 0, 0, nullptr);
+    device.on_connection_state(false, 0, 0);
+    now_us += 10000000;
+    auto connect_count = ble.connects;
+    device.loop();
+    assert(ble.connects == connect_count);
+    device.on_ota_global_state(esphome::ota::OTA_ABORT, 0, 0, nullptr);
+    now_us += 6000000;
+    device.loop();
+    assert(ble.connects == connect_count + 1);
+}
+#endif
 
 int main() {
     test_crypto();

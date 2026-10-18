@@ -3,6 +3,8 @@ project(bluetti_tests LANGUAGES CXX)
 
 find_path(MBEDTLS_INCLUDE_DIR mbedtls/aes.h REQUIRED)
 find_library(MBEDCRYPTO_LIBRARY mbedcrypto REQUIRED)
+find_path(BEARSSL_INCLUDE_DIR bearssl/bearssl.h REQUIRED)
+find_library(BEARSSL_LIBRARY bearssl REQUIRED)
 
 # Device K2 signatures cannot be manufactured in a test. Replace only the
 # trust-anchor constant in a build-directory copy with the P-256 generator
@@ -22,17 +24,29 @@ set(TEST_KEY "constexpr uint8_t PUBLIC_KEY_K2[65] = {
 string(REPLACE "${DEVICE_KEY}" "${TEST_KEY}" CRYPTO_SOURCE "${CRYPTO_SOURCE}")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/crypto_under_test.cpp" "${CRYPTO_SOURCE}")
 
-add_executable(bluetti_tests test_bluetti.cpp
-    ../components/bluetti/bluetti.cpp "${CMAKE_CURRENT_BINARY_DIR}/crypto_under_test.cpp")
-target_compile_features(bluetti_tests PRIVATE cxx_std_17)
-target_include_directories(bluetti_tests PRIVATE stubs ../components/bluetti "${MBEDTLS_INCLUDE_DIR}")
-target_link_libraries(bluetti_tests PRIVATE "${MBEDCRYPTO_LIBRARY}")
-target_compile_options(bluetti_tests PRIVATE -Wall -Wextra -Werror -Wformat=2 -UNDEBUG)
-
 option(SANITIZE "Run regression tests with AddressSanitizer and UndefinedBehaviorSanitizer" ON)
-if(SANITIZE)
-    target_compile_options(bluetti_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_link_options(bluetti_tests PRIVATE -fsanitize=address,undefined)
-endif()
 enable_testing()
-add_test(NAME protocol_and_state COMMAND bluetti_tests)
+foreach(BACKEND IN ITEMS esp32 rp2)
+    set(TARGET bluetti_tests_${BACKEND})
+    add_executable(${TARGET} test_bluetti.cpp
+        ../components/bluetti/bluetti.cpp
+        ../components/bluetti/bluetti_${BACKEND}.cpp
+        "${CMAKE_CURRENT_BINARY_DIR}/crypto_under_test.cpp")
+    if(BACKEND STREQUAL rp2)
+        target_sources(${TARGET} PRIVATE ../components/bluetti/bluetti_crypto_bearssl.cpp)
+        target_compile_definitions(${TARGET} PRIVATE USE_RP2 USE_OTA_STATE_LISTENER)
+        target_link_libraries(${TARGET} PRIVATE "${BEARSSL_LIBRARY}")
+    else()
+        target_sources(${TARGET} PRIVATE ../components/bluetti/bluetti_crypto_mbedtls.cpp)
+    endif()
+    target_compile_features(${TARGET} PRIVATE cxx_std_17)
+    target_include_directories(${TARGET} PRIVATE stubs ../components/bluetti
+        "${MBEDTLS_INCLUDE_DIR}" "${BEARSSL_INCLUDE_DIR}")
+    target_link_libraries(${TARGET} PRIVATE "${MBEDCRYPTO_LIBRARY}")
+    target_compile_options(${TARGET} PRIVATE -Wall -Wextra -Werror -Wformat=2 -UNDEBUG)
+    if(SANITIZE)
+        target_compile_options(${TARGET} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${TARGET} PRIVATE -fsanitize=address,undefined)
+    endif()
+    add_test(NAME protocol_and_state_${BACKEND} COMMAND ${TARGET})
+endforeach()
