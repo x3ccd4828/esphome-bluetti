@@ -137,7 +137,7 @@ Copy this YAML into a device entry in ESPHome Device Builder. When replacing
 an existing Pico W configuration, retain its current `esphome.name`, Wi-Fi,
 API encryption key, and OTA credentials so it remains reachable and Home
 Assistant keeps its identity. Set the Bluetti MAC address under `bluetti:`.
-The example currently loads `@feat/pico-w-backend` for testing before merging.
+Both example configurations load the component from `@main`.
 
 The platform-specific portion is:
 

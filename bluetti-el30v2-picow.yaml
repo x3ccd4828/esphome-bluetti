@@ -34,7 +34,7 @@ rp2:
 rp2040_ble:
 
 external_components:
-  - source: github://x3ccd4828/esphome-bluetti@feat/pico-w-backend
+  - source: github://x3ccd4828/esphome-bluetti@main
     components: [bluetti]
     refresh: 0s
 
