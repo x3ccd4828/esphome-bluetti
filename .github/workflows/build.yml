@@ -32,7 +32,7 @@ jobs:
       fail-fast: false
       matrix:
         esphome: ["2026.9.1", latest, dev]
-        config: [bluetti-el30v2.yaml, bluetti-el30v2-picow.yaml]
+        config: [bluetti-el30v2-esp32.yaml, bluetti-el30v2-picow.yaml]
     continue-on-error: ${{ matrix.esphome == 'dev' }}
     container:
       image: ghcr.io/esphome/esphome:${{ matrix.esphome }}
@@ -70,7 +70,7 @@ jobs:
           config = config[:start] + yaml.safe_dump(source, sort_keys=False) + config[end:]
           target = Path("/tmp/esphome-compat")
           target.mkdir()
-          (target / "bluetti-el30v2.yaml").write_text(config)
+          (target / "firmware.yaml").write_text(config)
           (target / "secrets.yaml").write_text(yaml.safe_dump({
               "wifi_ssid": "build-test",
               "wifi_password": "build-test-password",
@@ -78,4 +78,4 @@ jobs:
           }))
           PY
       - name: Compile using only the standalone YAML and GitHub source
-        run: esphome compile /tmp/esphome-compat/bluetti-el30v2.yaml
+        run: esphome compile /tmp/esphome-compat/firmware.yaml

@@ -1,6 +1,6 @@
 .PHONY: compile run logs clean
 
-CONFIG ?= bluetti-el30v2.yaml
+CONFIG ?= bluetti-el30v2-esp32.yaml
 IMAGE ?= docker.io/esphome/esphome:latest
 DEVICE ?= bluetti-el30v2.local
 CACHE_DIR ?= $(CURDIR)/.esphome/cache

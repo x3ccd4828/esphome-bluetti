@@ -21,7 +21,7 @@ This project enables full monitoring and control of Bluetti EL30V2 (and compatib
 ## 🛠️ Architecture
 
 ```
-bluetti-el30v2.yaml (ESPHome Config)
+bluetti-el30v2-esp32.yaml / bluetti-el30v2-picow.yaml (ESPHome Config)
     ↓
 components/bluetti/ (shared protocol and controls)
     ├── ESP32: ESPHome BLE client + ESP-IDF mbedTLS
@@ -36,7 +36,7 @@ Use ESPHome **2026.9.1 or newer**. The ESP32 configuration uses the ESP-IDF
 framework; see the Pico W configuration below for Raspberry Pi boards. The
 `bluetti` component uses C++ and has no Rust library or toolchain dependency.
 
-Edit `bluetti-el30v2.yaml` and update:
+Edit `bluetti-el30v2-esp32.yaml` and update:
 
 - **WiFi SSID/Password**: `!secret wifi_ssid` / `!secret wifi_password`
 - **MAC Address**: Under `ble_client` -> `mac_address`
@@ -76,7 +76,7 @@ For configurations using the earlier C++ branch, change
 `ble_client_id` values. The component files, C++ class, namespace, and log tag
 are now named `bluetti`.
 
-On another machine, you only need `bluetti-el30v2.yaml`, your own `secrets.yaml`,
+On another machine, you only need `bluetti-el30v2-esp32.yaml`, your own `secrets.yaml`,
 ESPHome, and internet access. No local `components/` directory, repository clone,
 or Rust toolchain is needed. The component builds directly against ESP-IDF's
 crypto library supplied by its framework.
@@ -95,7 +95,7 @@ logger setup; downloading the external component alone does not change it.
 ### 2. Compile and update over Wi-Fi
 
 ```bash
-esphome run bluetti-el30v2.yaml --device <ESP32_IP_ADDRESS>
+esphome run bluetti-el30v2-esp32.yaml --device <ESP32_IP_ADDRESS>
 ```
 
 For Podman users, the Makefile mounts the project and a persistent build cache,
@@ -117,7 +117,7 @@ For an initial USB flash with Podman:
 podman run --rm -it --device=/dev/ttyUSB0 --group-add keep-groups \
   --security-opt label=disable -v "$PWD:/config" \
   docker.io/esphome/esphome:2026.9.1 \
-  run bluetti-el30v2.yaml --device /dev/ttyUSB0
+  run bluetti-el30v2-esp32.yaml --device /dev/ttyUSB0
 ```
 
 On ESP32, the component enables mbedTLS through ESPHome's ESP-IDF helpers, including
