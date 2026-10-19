@@ -148,7 +148,7 @@ rp2:
 rp2040_ble:
 
 bluetti:
-  id: bluetti_handler
+  id: bluetti_el30v2_picow
   mac_address: "A8:46:74:31:18:12"
   address_type: public
 ```
