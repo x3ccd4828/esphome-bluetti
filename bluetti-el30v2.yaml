@@ -75,11 +75,11 @@ esp32_ble_tracker:
 
 ble_client:
   - mac_address: "A8:46:74:31:18:12"
-    id: bluetti_el30v2
+    id: bluetti_el30v2_esp32_ble_client
 
 bluetti:
   id: bluetti_el30v2_esp32
-  ble_client_id: bluetti_el30v2
+  ble_client_id: bluetti_el30v2_esp32_ble_client
 
 globals:
   - id: ac_always_on
@@ -180,7 +180,7 @@ binary_sensor:
   - platform: template
     name: "BLE Connected"
     lambda: |-
-      return id(bluetti_el30v2)->connected();
+      return id(bluetti_el30v2_esp32_ble_client)->connected();
 
 switch:
   - platform: template
@@ -188,13 +188,13 @@ switch:
     entity_category: diagnostic
     restore_mode: DISABLED
     lambda: |-
-      return id(bluetti_el30v2)->enabled;
+      return id(bluetti_el30v2_esp32_ble_client)->enabled;
     turn_on_action:
       - lambda: |-
-          id(bluetti_el30v2)->set_enabled(true);
+          id(bluetti_el30v2_esp32_ble_client)->set_enabled(true);
     turn_off_action:
       - lambda: |-
-          id(bluetti_el30v2)->set_enabled(false);
+          id(bluetti_el30v2_esp32_ble_client)->set_enabled(false);
 
   - platform: template
     id: ac_always_on_mode
