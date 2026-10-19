@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install host test dependencies
-        run: apt-get update -qq && apt-get install -y -qq cmake g++ libmbedtls-dev
+        run: apt-get update -qq && apt-get install -y -qq cmake g++ libmbedtls-dev libbearssl-dev
       - name: Test encryption and BLE command handling with sanitizers
         run: |
           cmake -S tests -B /tmp/bluetti-tests -DCMAKE_BUILD_TYPE=Debug
@@ -31,14 +31,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - esphome: "2026.9.1"
-            experimental: false
-          - esphome: latest
-            experimental: false
-          - esphome: dev
-            experimental: true
-    continue-on-error: ${{ matrix.experimental }}
+        esphome: ["2026.9.1", latest, dev]
+        config: [bluetti-el30v2-esp32.yaml, bluetti-el30v2-picow.yaml]
+    continue-on-error: ${{ matrix.esphome == 'dev' }}
     container:
       image: ghcr.io/esphome/esphome:${{ matrix.esphome }}
     steps:
@@ -47,6 +42,7 @@ jobs:
         env:
           COMPONENT_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           COMPONENT_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+          CONFIG_FILE: ${{ matrix.config }}
         run: |
           python3 - <<'PY'
           import base64
@@ -57,7 +53,7 @@ jobs:
 
           # Keep the YAML's !secret tags, and use the commit under test instead
           # of the example branch, including for pull requests from forks.
-          config = Path("bluetti-el30v2.yaml").read_text()
+          config = Path(os.environ["CONFIG_FILE"]).read_text()
           start = config.index("external_components:\n")
           end = config.index("\nlogger:\n", start)
           source = {
@@ -74,7 +70,7 @@ jobs:
           config = config[:start] + yaml.safe_dump(source, sort_keys=False) + config[end:]
           target = Path("/tmp/esphome-compat")
           target.mkdir()
-          (target / "bluetti-el30v2.yaml").write_text(config)
+          (target / "firmware.yaml").write_text(config)
           (target / "secrets.yaml").write_text(yaml.safe_dump({
               "wifi_ssid": "build-test",
               "wifi_password": "build-test-password",
@@ -82,4 +78,4 @@ jobs:
           }))
           PY
       - name: Compile using only the standalone YAML and GitHub source
-        run: esphome compile /tmp/esphome-compat/bluetti-el30v2.yaml
+        run: esphome compile /tmp/esphome-compat/firmware.yaml

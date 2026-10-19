@@ -1,12 +1,12 @@
 # Bluetti EL30V2 ESPHome Integration (C++)
 
-Complete implementation of Bluetti BLE encryption protocol for ESPHome using native C++ and ESP-IDF mbedTLS.
+Implementation of Bluetti BLE encryption for ESPHome using native C++ on ESP32 and Raspberry Pi Pico W.
 This project enables full monitoring and control of Bluetti EL30V2 (and compatible) devices via Home Assistant.
 
 ## 🚀 Features
 
 - **Secure BLE Handshake**: Full implementation of Bluetti's challenge-response + ECDH key exchange.
-- **Native C++ Core**: Crypto logic uses the mbedTLS library supplied by ESP-IDF.
+- **Native C++ Core**: ESP32 uses ESP-IDF mbedTLS; Pico W uses the framework's BearSSL library.
 - **Full Telemetry**:
   - Battery %
   - AC/DC Output Power
@@ -21,22 +21,22 @@ This project enables full monitoring and control of Bluetti EL30V2 (and compatib
 ## 🛠️ Architecture
 
 ```
-bluetti-el30v2.yaml (ESPHome Config)
+bluetti-el30v2-esp32.yaml / bluetti-el30v2-picow.yaml (ESPHome Config)
     ↓
-components/bluetti/ (native C++ ESPHome component)
-    ↓
-mbedTLS (ESP-IDF crypto primitives)
+components/bluetti/ (shared protocol and controls)
+    ├── ESP32: ESPHome BLE client + ESP-IDF mbedTLS
+    └── Pico W: ESPHome BTstack connection backend + BearSSL
 ```
 
 ## 📦 Quick Start
 
 ### 1. Configure ESPHome
 
-Use ESPHome **2026.9.1 or newer**, an ESP32 board with BLE, and the ESP-IDF
-framework. The component builds directly with ESPHome. The
+Use ESPHome **2026.9.1 or newer**. The ESP32 configuration uses the ESP-IDF
+framework; see the Pico W configuration below for Raspberry Pi boards. The
 `bluetti` component uses C++ and has no Rust library or toolchain dependency.
 
-Edit `bluetti-el30v2.yaml` and update:
+Edit `bluetti-el30v2-esp32.yaml` and update:
 
 - **WiFi SSID/Password**: `!secret wifi_ssid` / `!secret wifi_password`
 - **MAC Address**: Under `ble_client` -> `mac_address`
@@ -76,10 +76,10 @@ For configurations using the earlier C++ branch, change
 `ble_client_id` values. The component files, C++ class, namespace, and log tag
 are now named `bluetti`.
 
-On another machine, you only need `bluetti-el30v2.yaml`, your own `secrets.yaml`,
+On another machine, you only need `bluetti-el30v2-esp32.yaml`, your own `secrets.yaml`,
 ESPHome, and internet access. No local `components/` directory, repository clone,
 or Rust toolchain is needed. The component builds directly against ESP-IDF's
-mbedTLS library.
+crypto library supplied by its framework.
 
 `DC Always On` is enabled by default. Set the `dc_always_on` global's
 `initial_value` to `"false"` to prevent automatic DC output activation.
@@ -95,7 +95,7 @@ logger setup; downloading the external component alone does not change it.
 ### 2. Compile and update over Wi-Fi
 
 ```bash
-esphome run bluetti-el30v2.yaml --device <ESP32_IP_ADDRESS>
+esphome run bluetti-el30v2-esp32.yaml --device <ESP32_IP_ADDRESS>
 ```
 
 For Podman users, the Makefile mounts the project and a persistent build cache,
@@ -117,18 +117,59 @@ For an initial USB flash with Podman:
 podman run --rm -it --device=/dev/ttyUSB0 --group-add keep-groups \
   --security-opt label=disable -v "$PWD:/config" \
   docker.io/esphome/esphome:2026.9.1 \
-  run bluetti-el30v2.yaml --device /dev/ttyUSB0
+  run bluetti-el30v2-esp32.yaml --device /dev/ttyUSB0
 ```
 
-The component enables mbedTLS through ESPHome's ESP-IDF helpers, including
+On ESP32, the component enables mbedTLS through ESPHome's ESP-IDF helpers, including
 the MD5 primitive required by Bluetti's protocol. It builds with ESPHome's
 default native ESP-IDF toolchain without a static Rust archive or a script
 that patches generated build files.
 
+### Raspberry Pi Pico W
+
+Use [bluetti-el30v2-picow.yaml](bluetti-el30v2-picow.yaml). It has the same
+telemetry, controls, API encryption, and Always On behavior as the ESP32
+configuration, with a separate device name. It uses the built-in RP2 BTstack
+connection backend and BearSSL; no additional crypto dependency is downloaded.
+The original ESP32 YAML and Bluetooth backend continue to work.
+
+Copy this YAML into a device entry in ESPHome Device Builder. When replacing
+an existing Pico W configuration, retain its current `esphome.name`, Wi-Fi,
+API encryption key, and OTA credentials so it remains reachable and Home
+Assistant keeps its identity. Set the Bluetti MAC address under `bluetti:`.
+Both example configurations load the component from `@main`.
+
+The platform-specific portion is:
+
+```yaml
+rp2:
+  board: rpipicow
+
+rp2040_ble:
+
+bluetti:
+  id: bluetti_el30v2_picow
+  mac_address: "A8:46:74:31:18:12"
+  address_type: public
+```
+
+Use `address_type: random` only for a Bluetti advertising a random BLE address.
+The Pico connects directly to that address, discovers the service and actual
+notification descriptor, and reconnects automatically. Its BLE Client switch
+enables/disables this connection. A BLE tracker or Bluetooth proxy is not
+required. During testing, turn off the existing ESP32's BLE Client switch so
+the two boards do not compete for the same Bluetti connection.
+
+Choose **Install → Wirelessly** for a Pico already running ESPHome. For an
+initial installation, download the UF2 through Device Builder, hold BOOTSEL
+while connecting the Pico to USB, and copy the UF2 onto the `RPI-RP2` drive.
+Live BLE operation on the Pico requires hardware testing; compilation and
+simulated transport tests do not establish radio compatibility.
+
 ### Compatibility checks
 
 GitHub Actions compiles the full configuration on pushes and pull requests
-against ESPHome `2026.9.1`, `latest`, and `dev`. A weekly schedule also runs once
+for both ESP32 and Pico W against ESPHome `2026.9.1`, `latest`, and `dev`. A weekly schedule also runs once
 the workflow is on the repository's default branch. CI builds from a separate
 configuration directory containing only the YAML and test Wi-Fi credentials,
 and downloads the component from the exact GitHub commit being checked.
@@ -137,9 +178,11 @@ these builds detect compatibility regressions rather than guarantee support
 for every future release. Compilation does not verify the live BLE handshake
 or output controls, which require an ESP32 and a Bluetti device.
 
-Host regression tests exercise the signed handshake, protocol vectors, buffer
-bounds, telemetry, queued AC/DC commands, retries, and disconnect handling.
-With CMake, a C++17 compiler, and mbedTLS 3.x development headers installed:
+Host regression tests exercise both crypto implementations, the signed handshake,
+protocol vectors, buffer bounds, telemetry, queued AC/DC commands, retries,
+and disconnect handling. Pico-specific tests cover asynchronous GATT writes,
+notification subscription, cancellation, reconnection, and OTA pauses. With CMake, a C++17
+compiler, and mbedTLS 3.x and BearSSL development packages installed:
 
 ```bash
 cmake -S tests -B /tmp/bluetti-tests -DCMAKE_BUILD_TYPE=Debug
